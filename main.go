@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+var version = "dev"
+
 func main() {
 	args := os.Args[1:]
 
@@ -63,6 +65,12 @@ doneFlags:
 		runPick(args[1:], histFile)
 	case "completion":
 		runCompletion(args[1:])
+	case "version":
+		v := version
+		if !strings.HasPrefix(v, "v") {
+			v = "v" + v
+		}
+		fmt.Println(v)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", args[0])
 		printUsage()
