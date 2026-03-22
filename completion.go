@@ -56,6 +56,7 @@ _shlog() {
         'pick:interactively pick entries and print their commands (requires fzf)'
         'undo:restore history from last backup'
         'completion:print shell completion script'
+        'version:print the current version'
       )
       _describe 'command' commands
       ;;
@@ -97,7 +98,7 @@ const bashCompletion = `_shlog() {
     cword=$COMP_CWORD
   }
 
-  local commands="del clean list grep stats pick undo completion"
+  local commands="del clean list grep stats pick undo completion version"
   local global_opts="-f -s --dry-run -o --histfile"
 
   # Complete --histfile argument with file paths
@@ -160,7 +161,7 @@ complete -c shlog -s o -d 'output: print resulting file content without writing'
 complete -c shlog -l histfile -r -d 'use custom history file instead of default'
 
 # Commands (only when no subcommand has been given yet)
-set -l cmds del clean list grep stats pick undo completion
+set -l cmds del clean list grep stats pick undo completion version
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a del        -d 'delete entries matching a selection or pattern'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a clean      -d 'remove duplicate entries'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a list       -d 'print entries with index and timestamp'
@@ -169,6 +170,7 @@ complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a stats      -d 's
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a pick       -d 'interactively pick entries using fzf'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a undo       -d 'restore history from last backup'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a completion -d 'print shell completion script'
+complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a version    -d 'print the current version'
 
 # del subcommand options
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l match  -d 'regex pattern to match against command text'

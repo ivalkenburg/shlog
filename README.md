@@ -33,6 +33,7 @@ shlog [options] <command> [args]
 | `del --pick [<selection>]` | Interactively pick entries to delete (requires `fzf`) |
 | `undo` | Restore the history file from the last backup |
 | `completion <shell>` | Print a shell completion script (`zsh`, `bash`, or `fish`) |
+| `version` | Print the current version |
 
 ### Options
 

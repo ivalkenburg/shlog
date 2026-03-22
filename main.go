@@ -224,6 +224,7 @@ Commands:
   pick --multi [<selection>]      pick multiple entries
   undo                            restore history from the last backup
   completion <shell>              print shell completion script (zsh, bash)
+  version                         print the current version
 
 Options:
   -f              force: never ask for confirmation
