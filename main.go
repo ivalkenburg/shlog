@@ -66,11 +66,7 @@ doneFlags:
 	case "completion":
 		runCompletion(args[1:])
 	case "version":
-		v := version
-		if !strings.HasPrefix(v, "v") {
-			v = "v" + v
-		}
-		fmt.Println(v)
+		fmt.Println(version)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", args[0])
 		printUsage()
