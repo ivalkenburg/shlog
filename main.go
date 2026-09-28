@@ -60,7 +60,7 @@ doneFlags:
 	case "stats":
 		runStats(args[1:], histFile)
 	case "undo":
-		runUndo(force, simulate, histFile)
+		runUndo(force, simulate, output, histFile)
 	case "pick":
 		runPick(args[1:], histFile)
 	case "completion":
@@ -77,21 +77,22 @@ doneFlags:
 // helpers
 
 func loadHistory(histFile string) []*Entry {
-	entries, err := ParseHistoryFile(histFile)
+	entries, _ := loadHistorySnapshot(histFile)
+	return entries
+}
+
+func loadHistorySnapshot(histFile string) ([]*Entry, []byte) {
+	data, err := os.ReadFile(histFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading history file %s: %v\n", histFile, err)
 		os.Exit(1)
 	}
-	return entries
+	return parseHistoryData(data), data
 }
 
-func writeHistory(histFile string, entries []*Entry) {
-	if err := BackupHistoryFile(histFile); err != nil {
-		fmt.Fprintf(os.Stderr, "error creating backup: %v\n", err)
-		os.Exit(1)
-	}
-	if err := WriteHistoryFile(histFile, entries); err != nil {
-		fmt.Fprintf(os.Stderr, "error writing history file: %v\n", err)
+func writeHistory(histFile string, original []byte, entries []*Entry) {
+	if err := ReplaceHistoryFile(histFile, original, entries); err != nil {
+		fmt.Fprintf(os.Stderr, "error updating history file: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -232,7 +233,7 @@ Selections (for del, clean, list, grep, pick, and stats):
   -N              last N entries (e.g. -1, -100)
   N               first N entries (e.g. 1, 100)
   -<duration>     entries from last N time (e.g. -1h, -30m, -1h30m)
-  <duration>      entries within N time from first entry (e.g. 1h, 30m)
+  <duration>      entries within N time from first timestamped entry (e.g. 1h, 30m)
   <date>..<date>  entries in date/datetime range (e.g. 2024-01-01..2024-01-31)
   <date>          all entries within that unit (e.g. 2024-01-15, 2024-01-15T14)
                   formats: YYYY-MM-DD, YYYY-MM-DDTHH, YYYY-MM-DDTHH:MM, YYYY-MM-DDTHH:MM:SS

@@ -8,6 +8,7 @@ import (
 func runDel(args []string, force, simulate, output bool, histFile string) {
 	// parse del-specific flags: --match <pattern>, --invert, --pick, or a plain selection
 	var pattern, selection string
+	patternSet := false
 	invert := false
 	pick := false
 	for i := 0; i < len(args); i++ {
@@ -19,6 +20,7 @@ func runDel(args []string, force, simulate, output bool, histFile string) {
 				os.Exit(1)
 			}
 			pattern = args[i]
+			patternSet = true
 		case "--invert":
 			invert = true
 		case "--pick":
@@ -28,21 +30,21 @@ func runDel(args []string, force, simulate, output bool, histFile string) {
 		}
 	}
 
-	if !pick && pattern == "" && selection == "" {
+	if !pick && !patternSet && selection == "" {
 		fmt.Fprintln(os.Stderr, "error: missing selection, --match, or --pick argument")
 		printUsage()
 		os.Exit(1)
 	}
-	if invert && pattern == "" {
+	if invert && !patternSet {
 		fmt.Fprintln(os.Stderr, "error: --invert requires --match")
 		os.Exit(1)
 	}
-	if pick && pattern != "" {
+	if pick && patternSet {
 		fmt.Fprintln(os.Stderr, "error: --pick and --match cannot be used together")
 		os.Exit(1)
 	}
 
-	entries := loadHistory(histFile)
+	entries, original := loadHistorySnapshot(histFile)
 
 	var toDelete []*Entry
 	if pick {
@@ -65,7 +67,7 @@ func runDel(args []string, force, simulate, output bool, histFile string) {
 			fmt.Println("No entries selected.")
 			return
 		}
-	} else if pattern != "" {
+	} else if patternSet {
 		matched, err := MatchEntries(entries, pattern)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -109,6 +111,6 @@ func runDel(args []string, force, simulate, output bool, histFile string) {
 		return
 	}
 
-	writeHistory(histFile, remaining)
+	writeHistory(histFile, original, remaining)
 	fmt.Printf("Deleted %d entries. %d entries remaining.\n", len(toDelete), len(remaining))
 }

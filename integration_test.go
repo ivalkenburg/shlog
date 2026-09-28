@@ -123,7 +123,6 @@ func TestCompletionSubcommand_Bash(t *testing.T) {
 	}
 }
 
-
 // TestCompletionSubcommand_UnknownShell verifies that an unknown shell exits
 // with a non-zero status and prints a useful error.
 func TestCompletionSubcommand_UnknownShell(t *testing.T) {
@@ -264,6 +263,28 @@ func TestBashTimestamped_Del_Integer(t *testing.T) {
 	}
 }
 
+func TestBashMixedHistory_CleanPreservesEarlierCommands(t *testing.T) {
+	content := "old command\n#1704067200\nls\n#1704067300\nls\n"
+	hist := writeTempHistory(t, content)
+	if out, err := runGoshist(t, "--histfile", hist, "-f", "clean"); err != nil {
+		t.Fatalf("clean failed: %v\n%s", err, out)
+	}
+	written, err := os.ReadFile(hist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(written) != "old command\n#1704067300\nls\n" {
+		t.Errorf("mixed history was changed unexpectedly: %q", written)
+	}
+	stats, err := runGoshist(t, "--histfile", hist, "stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stats, "Date range: 2024-01-01 to 2024-01-01") {
+		t.Errorf("stats should show range from timestamped entries: %s", stats)
+	}
+}
+
 // TestCleanKeepOldest verifies that clean --keep-oldest keeps the first
 // occurrence of each duplicate rather than the most recent.
 func TestCleanKeepOldest(t *testing.T) {
@@ -366,6 +387,46 @@ func TestBashTimestamped_Undo(t *testing.T) {
 	entries, _ := ParseHistoryFile(hist)
 	if len(entries) != 3 {
 		t.Errorf("expected 3 entries after undo, got %d", len(entries))
+	}
+}
+
+func TestUndoOutputOverridesDryRunWithoutWriting(t *testing.T) {
+	hist := writeTempHistory(t, ": 1000:0;current\n")
+	backup := ": 900:0;previous\n"
+	if err := os.WriteFile(hist+".bak", []byte(backup), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runGoshist(t, "--histfile", hist, "-s", "-o", "undo")
+	if err != nil {
+		t.Fatalf("undo output failed: %v\n%s", err, out)
+	}
+	if out != backup {
+		t.Errorf("output = %q, want exact backup content %q", out, backup)
+	}
+	current, err := os.ReadFile(hist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != ": 1000:0;current\n" {
+		t.Errorf("history changed during output: %q", current)
+	}
+	stillBackup, err := os.ReadFile(hist + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stillBackup) != backup {
+		t.Errorf("backup changed during output: %q", stillBackup)
+	}
+}
+
+func TestDelEmptyRegexMatchesAllEntries(t *testing.T) {
+	hist := writeTempHistory(t, singleLineHistory)
+	out, err := runGoshist(t, "--histfile", hist, "-o", "del", "--match", "")
+	if err != nil {
+		t.Fatalf("empty regex should be valid: %v\n%s", err, out)
+	}
+	if out != "" {
+		t.Errorf("deleting every entry should produce empty output, got %q", out)
 	}
 }
 

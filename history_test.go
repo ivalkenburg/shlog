@@ -229,6 +229,107 @@ func TestWriteHistoryFile_Atomic(t *testing.T) {
 	}
 }
 
+func TestParseHistoryFile_LongLineDoesNotDropLaterEntries(t *testing.T) {
+	content := ": 1000:0;" + strings.Repeat("x", 4*1024*1024+1) + "\n: 1001:0;keep me\n"
+	path := writeTempHistory(t, content)
+	entries, err := ParseHistoryFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || CommandText(entries[1]) != "keep me" {
+		t.Fatalf("long line lost later entries: got %d entries", len(entries))
+	}
+}
+
+func TestHistoryWritesPreservePermissions(t *testing.T) {
+	path := writeTempHistory(t, ": 1000:0;original\n")
+	if err := os.Chmod(path, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := BackupHistoryFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteHistoryFile(path, []*Entry{entryWithCmd(1001, "replacement")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreBackup(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{path, path + ".bak"} {
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0640 {
+			t.Errorf("%s mode = %04o, want 0640", name, got)
+		}
+	}
+}
+
+func TestHistoryWritesFollowSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "actual_history")
+	link := filepath.Join(dir, "history")
+	original := ": 1000:0;original\n"
+	if err := os.WriteFile(target, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := BackupHistoryFile(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteHistoryFile(link, []*Entry{entryWithCmd(1001, "replacement")}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("history link was replaced: info=%v, err=%v", info, err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "replacement") {
+		t.Errorf("target was not updated: %q", data)
+	}
+	if err := RestoreBackup(link); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Errorf("undo did not restore target: %q", data)
+	}
+}
+
+func TestReplaceHistoryFileRejectsChangesSinceRead(t *testing.T) {
+	path := writeTempHistory(t, ": 1000:0;original\n")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := ": 1000:0;original\n: 1001:0;added by shell\n"
+	if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceHistoryFile(path, original, []*Entry{entryWithCmd(1002, "replacement")}); err == nil {
+		t.Fatal("expected conflict error")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != updated {
+		t.Errorf("changed history was overwritten: %q", data)
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("conflict should not create a backup, stat error = %v", err)
+	}
+}
+
 // BackupHistoryFile
 
 func TestBackupHistoryFile_CreatesBackup(t *testing.T) {
@@ -401,6 +502,23 @@ func TestRestoreBackup_RestoresContent(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "from backup") {
 		t.Errorf("expected restored content, got: %q", string(data))
+	}
+	previous, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(previous) != ": 1000:0;original\n" {
+		t.Errorf("backup should contain previous history, got %q", previous)
+	}
+	if err := RestoreBackup(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != ": 1000:0;original\n" {
+		t.Errorf("second undo should restore previous history, got %q", data)
 	}
 }
 
@@ -753,6 +871,35 @@ func TestSelectEntries_DateRange_ToDateInclusive(t *testing.T) {
 	}
 	if len(result) != 1 {
 		t.Fatalf("expected 1 entry (end-of-day inclusive), got %d", len(result))
+	}
+}
+
+func TestSelectEntries_DayAcrossDaylightSavingChange(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("time zone unavailable: %v", err)
+	}
+	oldLocal := time.Local
+	time.Local = loc
+	t.Cleanup(func() { time.Local = oldLocal })
+
+	for _, date := range []string{"2024-03-10", "2024-11-03"} {
+		day, err := time.ParseInLocation("2006-01-02", date, loc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		late := day.AddDate(0, 0, 1).Add(-time.Minute)
+		next := day.AddDate(0, 0, 1)
+		entries := makeEntries(late.Unix(), next.Unix())
+		for _, selection := range []string{date, date + ".." + date} {
+			got, err := SelectEntries(entries, selection)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0] != entries[0] {
+				t.Errorf("%s selected %v; want only the last minute of the day", selection, timestampsOf(got))
+			}
+		}
 	}
 }
 
@@ -1533,14 +1680,17 @@ func TestParseBashTimestamped_MultiLine(t *testing.T) {
 	}
 }
 
-func TestParseBashTimestamped_LinesBeforeFirstTimestampIgnored(t *testing.T) {
-	input := "ignored line\n#1704067200\nls\n"
+func TestParseBashTimestamped_PreservesCommandsBeforeFirstTimestamp(t *testing.T) {
+	input := "earlier command\n#1704067200\nls\n"
 	entries := parseBashTimestamped(strings.NewReader(input))
-	if len(entries) != 1 {
-		t.Fatalf("expected 1, got %d", len(entries))
+	if len(entries) != 2 {
+		t.Fatalf("expected 2, got %d", len(entries))
 	}
-	if CommandText(entries[0]) != "ls" {
-		t.Errorf("unexpected cmd: %q", CommandText(entries[0]))
+	if CommandText(entries[0]) != "earlier command" || entries[0].Timestamp != 0 {
+		t.Errorf("unexpected earlier entry: %q, timestamp %d", CommandText(entries[0]), entries[0].Timestamp)
+	}
+	if CommandText(entries[1]) != "ls" {
+		t.Errorf("unexpected later command: %q", CommandText(entries[1]))
 	}
 }
 
@@ -1649,6 +1799,27 @@ func TestHasTimestamps_True(t *testing.T) {
 	entries := makeEntries(1000, 2000)
 	if !hasTimestamps(entries) {
 		t.Error("expected hasTimestamps=true")
+	}
+}
+
+func TestSelectEntries_MixedBashHistorySkipsUntimestampedEntries(t *testing.T) {
+	base := int64(1704067200)
+	entries := []*Entry{
+		{Raw: []string{"old command"}},
+		{Timestamp: base, Raw: []string{"#1704067200", "first timed command"}},
+		{Timestamp: base + 1800, Raw: []string{"#1704069000", "second timed command"}},
+	}
+	if !hasTimestamps(entries) {
+		t.Fatal("expected mixed history to have timestamps")
+	}
+	for _, selection := range []string{"1h", "2024-01-01"} {
+		got, err := SelectEntries(entries, selection)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || got[0] != entries[1] || got[1] != entries[2] {
+			t.Errorf("%s selected %v; want both timestamped entries", selection, timestampsOf(got))
+		}
 	}
 }
 

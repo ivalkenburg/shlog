@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func runStats(args []string, histFile string) {
@@ -26,9 +27,21 @@ func runStats(args []string, histFile string) {
 
 	stats := ComputeStats(scope, 10)
 
-	if scope[0].Timestamp != 0 {
-		first := scope[0].Time().Format("2006-01-02")
-		last := scope[len(scope)-1].Time().Format("2006-01-02")
+	var firstTS, lastTS int64
+	for _, e := range scope {
+		if e.Timestamp == 0 {
+			continue
+		}
+		if firstTS == 0 || e.Timestamp < firstTS {
+			firstTS = e.Timestamp
+		}
+		if e.Timestamp > lastTS {
+			lastTS = e.Timestamp
+		}
+	}
+	if firstTS != 0 {
+		first := time.Unix(firstTS, 0).Format("2006-01-02")
+		last := time.Unix(lastTS, 0).Format("2006-01-02")
 		fmt.Printf("Entries: %d  Unique: %d  Date range: %s to %s\n\n", stats.Total, stats.Unique, first, last)
 	} else {
 		fmt.Printf("Entries: %d  Unique: %d\n\n", stats.Total, stats.Unique)

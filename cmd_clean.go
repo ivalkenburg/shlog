@@ -6,7 +6,7 @@ import (
 )
 
 func runClean(args []string, force, simulate, output bool, histFile string) {
-	entries := loadHistory(histFile)
+	entries, original := loadHistorySnapshot(histFile)
 
 	// parse clean-specific flags
 	keepOldest := false
@@ -56,6 +56,6 @@ func runClean(args []string, force, simulate, output bool, histFile string) {
 		return
 	}
 
-	writeHistory(histFile, remaining)
+	writeHistory(histFile, original, remaining)
 	fmt.Printf("Removed %d duplicate entries. %d entries remaining.\n", len(removed), len(remaining))
 }

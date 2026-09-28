@@ -5,11 +5,23 @@ import (
 	"os"
 )
 
-func runUndo(force, simulate bool, histFile string) {
+func runUndo(force, simulate, output bool, histFile string) {
 	bakFile := histFile + ".bak"
 	if _, err := os.Stat(bakFile); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "error: no backup found at %s\n", bakFile)
 		os.Exit(1)
+	}
+	if output {
+		data, err := os.ReadFile(bakFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error reading backup: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := os.Stdout.Write(data); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing output: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	entries, err := ParseHistoryFile(bakFile)

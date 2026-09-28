@@ -33,7 +33,7 @@ const (
 	formatFish                              // `- cmd: <cmd>` + `  when: <ts>` (YAML-like)
 )
 
-// Entry represents a single logical entry in a zsh extended history file.
+// Entry represents a single logical shell history entry.
 // Multi-line commands span multiple Raw lines.
 type Entry struct {
 	Timestamp int64
@@ -52,22 +52,46 @@ func (e *Entry) String() string {
 
 // ParseHistoryFile reads a history file, auto-detects its format, and returns
 // all entries. Supported formats: zsh extended history, bash with HISTTIMEFORMAT,
-// and plain bash (one command per line, assumes cmdhist is enabled).
+// plain bash (one command per line, assumes cmdhist is enabled), and fish.
 func ParseHistoryFile(path string) ([]*Entry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	fmt := detectFormat(bytes.NewReader(data))
-	return parseHistory(bytes.NewReader(data), fmt), nil
+	return parseHistoryData(data), nil
+}
+
+func parseHistoryData(data []byte) []*Entry {
+	lines := splitHistoryLines(data)
+	return parseHistoryLines(lines, detectFormatLines(lines))
+}
+
+// historyLines has no scanner token limit. Shell commands can exceed the
+// default 64 KiB scanner limit (and the old 4 MiB parser limit).
+func historyLines(r io.Reader) []string {
+	data, _ := io.ReadAll(r) // callers parse an already-read file or in-memory input
+	return splitHistoryLines(data)
+}
+
+func splitHistoryLines(data []byte) []string {
+	if len(data) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // detectFormat scans r and returns the history format based on the first
 // recognisable line. Returns formatBashPlain if no marker is found.
 func detectFormat(r io.Reader) histFormat {
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		line := scanner.Text()
+	return detectFormatLines(historyLines(r))
+}
+
+func detectFormatLines(lines []string) histFormat {
+	for _, line := range lines {
 		if entryHeaderRe.MatchString(line) {
 			return formatZsh
 		}
@@ -81,29 +105,28 @@ func detectFormat(r io.Reader) histFormat {
 	return formatBashPlain
 }
 
-func parseHistory(r io.Reader, f histFormat) []*Entry {
+func parseHistoryLines(lines []string, f histFormat) []*Entry {
 	switch f {
 	case formatZsh:
-		return parseZshHistory(r)
+		return parseZshLines(lines)
 	case formatBashTimestamped:
-		return parseBashTimestamped(r)
+		return parseBashTimestampedLines(lines)
 	case formatFish:
-		return parseFishHistory(r)
+		return parseFishLines(lines)
 	default:
-		return parseBashPlain(r)
+		return parseBashPlainLines(lines)
 	}
 }
 
 func parseZshHistory(r io.Reader) []*Entry {
+	return parseZshLines(historyLines(r))
+}
+
+func parseZshLines(lines []string) []*Entry {
 	var entries []*Entry
 	var current *Entry
 
-	scanner := bufio.NewScanner(r)
-	// large buffer for very long lines (e.g. big curl commands)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
+	for _, line := range lines {
 		if m := entryHeaderRe.FindStringSubmatch(line); m != nil {
 			ts, _ := strconv.ParseInt(m[1], 10, 64)
 			elapsed, _ := strconv.ParseInt(m[2], 10, 64)
@@ -125,16 +148,21 @@ func parseZshHistory(r io.Reader) []*Entry {
 // parseBashTimestamped parses a bash history file written with HISTTIMEFORMAT
 // set. Each entry begins with a `#<unix_timestamp>` line followed by one or
 // more command lines (multi-line commands are supported via lithist).
-// Lines appearing before the first timestamp line are ignored.
+// Commands before the first timestamp are kept as plain entries. Bash files
+// can contain both kinds when HISTTIMEFORMAT was enabled after earlier use.
 func parseBashTimestamped(r io.Reader) []*Entry {
-	var entries []*Entry
+	return parseBashTimestampedLines(historyLines(r))
+}
+
+func parseBashTimestampedLines(lines []string) []*Entry {
+	firstMarker := 0
+	for firstMarker < len(lines) && !bashTimestampRe.MatchString(lines[firstMarker]) {
+		firstMarker++
+	}
+	entries := parseBashPlainLines(lines[:firstMarker])
 	var current *Entry
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
+	for _, line := range lines[firstMarker:] {
 		if m := bashTimestampRe.FindStringSubmatch(line); m != nil {
 			ts, _ := strconv.ParseInt(m[1], 10, 64)
 			current = &Entry{Timestamp: ts, Raw: []string{line}}
@@ -152,14 +180,14 @@ func parseBashTimestamped(r io.Reader) []*Entry {
 // escape sequences on a single line. All lines until the next `- cmd: ` marker
 // belong to the current entry and are preserved verbatim in Raw for round-tripping.
 func parseFishHistory(r io.Reader) []*Entry {
+	return parseFishLines(historyLines(r))
+}
+
+func parseFishLines(lines []string) []*Entry {
 	var entries []*Entry
 	var current *Entry
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
+	for _, line := range lines {
 		if fishCmdRe.MatchString(line) {
 			current = &Entry{Raw: []string{line}}
 			entries = append(entries, current)
@@ -185,14 +213,14 @@ func parseFishHistory(r io.Reader) []*Entry {
 // indistinguishable from a continuation marker — this is an inherent ambiguity
 // in the plain bash history format (bash itself has the same limitation).
 func parseBashPlain(r io.Reader) []*Entry {
+	return parseBashPlainLines(historyLines(r))
+}
+
+func parseBashPlainLines(lines []string) []*Entry {
 	var entries []*Entry
 	var current *Entry
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
+	for _, line := range lines {
 		if line == "" {
 			// Blank lines are not part of any command; reset continuation state.
 			current = nil
@@ -212,83 +240,139 @@ func parseBashPlain(r io.Reader) []*Entry {
 // in the same directory and renames it over the target so a crash mid-write
 // cannot corrupt the history file.
 func WriteHistoryFile(path string, entries []*Entry) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".hist_tmp_*")
+	var err error
+	path, err = writeTarget(path)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-
-	w := bufio.NewWriter(tmp)
-	for _, e := range entries {
-		for _, line := range e.Raw {
-			if _, err := fmt.Fprintln(w, line); err != nil {
-				tmp.Close()
-				os.Remove(tmpName)
-				return err
+	mode := os.FileMode(0600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return atomicWrite(path, mode, func(dst io.Writer) error {
+		w := bufio.NewWriter(dst)
+		for _, e := range entries {
+			for _, line := range e.Raw {
+				if _, err := fmt.Fprintln(w, line); err != nil {
+					return err
+				}
 			}
 		}
+		return w.Flush()
+	})
+}
+
+// ReplaceHistoryFile refuses to overwrite history changed since it was read.
+// This catches shell appends while the user is reviewing a confirmation prompt.
+func ReplaceHistoryFile(path string, original []byte, entries []*Entry) error {
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return err
 	}
-	if err := w.Flush(); err != nil {
+	if !bytes.Equal(current, original) {
+		return fmt.Errorf("history file changed since it was read; retry the command")
+	}
+	if err := BackupHistoryFile(path); err != nil {
+		return err
+	}
+	return WriteHistoryFile(path, entries)
+}
+
+// writeTarget follows an existing history-file symlink so an atomic rename
+// updates its target instead of replacing the link itself.
+func writeTarget(path string) (string, error) {
+	target, err := filepath.EvalSymlinks(path)
+	if os.IsNotExist(err) {
+		if _, statErr := os.Lstat(path); statErr == nil {
+			return "", err // broken symlink: do not replace it with a new file
+		}
+		return path, nil
+	}
+	return target, err
+}
+
+func atomicWrite(path string, mode os.FileMode, write func(io.Writer) error) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".hist_tmp_*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
-		os.Remove(tmpName)
+		return err
+	}
+	if err := write(tmp); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
 		return err
 	}
-	return os.Rename(tmpName, path)
+	return os.Rename(tmp.Name(), path)
+}
+
+func atomicCopy(srcPath, dstPath string) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	info, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	return atomicWrite(dstPath, info.Mode().Perm(), func(dst io.Writer) error {
+		_, err := io.Copy(dst, src)
+		return err
+	})
 }
 
 // BackupHistoryFile copies path to path+".bak". It is a no-op if path does
 // not exist yet.
 func BackupHistoryFile(path string) error {
-	src, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
 		return err
 	}
-	defer src.Close()
-
-	dst, err := os.Create(path + ".bak")
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-
-	_, err = io.Copy(dst, src)
-	return err
+	return atomicCopy(path, path+".bak")
 }
 
-// RestoreBackup atomically copies path+".bak" back over path.
+// RestoreBackup atomically restores path+".bak" and first backs up the current
+// history file. A second undo therefore restores the state before the first.
 func RestoreBackup(path string) error {
+	target, err := writeTarget(path)
+	if err != nil {
+		return err
+	}
 	bak := path + ".bak"
 	src, err := os.Open(bak)
 	if err != nil {
 		return err
 	}
-	defer src.Close()
-
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".hist_tmp_*")
+	info, err := src.Stat()
+	if err != nil {
+		src.Close()
+		return err
+	}
+	data, err := io.ReadAll(src)
+	src.Close()
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-
-	if _, err := io.Copy(tmp, src); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+	if err := BackupHistoryFile(path); err != nil {
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+	return atomicWrite(target, info.Mode().Perm(), func(dst io.Writer) error {
+		_, err := dst.Write(data)
 		return err
-	}
-	return os.Rename(tmpName, path)
+	})
 }
 
 // CommandText returns the command text of an entry, stripping any format-specific
@@ -442,7 +526,12 @@ func ComputeStats(entries []*Entry, topN int) Stats {
 // hasTimestamps reports whether the entries carry timestamp information.
 // Plain bash history files have Timestamp == 0 for all entries.
 func hasTimestamps(entries []*Entry) bool {
-	return len(entries) > 0 && entries[0].Timestamp != 0
+	for _, e := range entries {
+		if e.Timestamp != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 const errNoTimestamps = "selection %q requires timestamps, but no timestamps were found in this history file"
@@ -454,7 +543,7 @@ const errNoTimestamps = "selection %q requires timestamps, but no timestamps wer
 //	-N                  last N entries (negative integer)
 //	N                   first N entries (positive integer)
 //	-<duration>         entries whose timestamp >= now - duration  (e.g. -1h, -30m)
-//	<duration>          entries within duration from the first entry (e.g. 1h, 30m)
+//	<duration>          entries within duration from the first timestamped entry (e.g. 1h, 30m)
 //	<date>..<date>      entries within the date/datetime range (inclusive)
 //	                    dates: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
 func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
@@ -476,7 +565,7 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 		var result []*Entry
 		for _, e := range entries {
 			t := e.Time()
-			if !t.Before(from) && !t.After(to) {
+			if e.Timestamp != 0 && !t.Before(from) && !t.After(to) {
 				result = append(result, e)
 			}
 		}
@@ -513,11 +602,11 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 				if !hasTimestamps(entries) {
 					return nil, fmt.Errorf(errNoTimestamps, selection)
 				}
-				to := pd.t.Add(pd.gran - time.Nanosecond)
+				to := pd.end()
 				var result []*Entry
 				for _, e := range entries {
 					t := e.Time()
-					if !t.Before(pd.t) && !t.After(to) {
+					if e.Timestamp != 0 && !t.Before(pd.t) && !t.After(to) {
 						result = append(result, e)
 					}
 				}
@@ -539,19 +628,25 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 		cutoff := time.Now().Add(-dur)
 		var result []*Entry
 		for _, e := range entries {
-			if !e.Time().Before(cutoff) {
+			if e.Timestamp != 0 && !e.Time().Before(cutoff) {
 				result = append(result, e)
 			}
 		}
 		return result, nil
 	}
 
-	// entries within <dur> starting from the first entry's timestamp
-	start := entries[0].Time()
+	// entries within <dur> starting from the first timestamped entry
+	var start time.Time
+	for _, e := range entries {
+		if e.Timestamp != 0 {
+			start = e.Time()
+			break
+		}
+	}
 	cutoff := start.Add(dur)
 	var result []*Entry
 	for _, e := range entries {
-		if !e.Time().After(cutoff) {
+		if e.Timestamp != 0 && !e.Time().After(cutoff) {
 			result = append(result, e)
 		}
 	}
@@ -562,7 +657,14 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 // unit present (second, minute, hour, or day).
 type parsedDate struct {
 	t    time.Time
-	gran time.Duration // span of the unit: second=1s, minute=1m, hour=1h, day=24h
+	gran time.Duration // unit size; a day uses calendar arithmetic in end()
+}
+
+func (d parsedDate) end() time.Time {
+	if d.gran == 24*time.Hour {
+		return d.t.AddDate(0, 0, 1).Add(-time.Nanosecond)
+	}
+	return d.t.Add(d.gran - time.Nanosecond)
 }
 
 var dateFormats = []struct {
@@ -597,5 +699,5 @@ func parseDateRange(fromStr, toStr string) (time.Time, time.Time, error) {
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("invalid to-date: %v", err)
 	}
-	return from.t, to.t.Add(to.gran - time.Nanosecond), nil
+	return from.t, to.end(), nil
 }

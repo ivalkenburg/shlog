@@ -66,7 +66,7 @@ A selection narrows a command to part of the history:
 | `-N` | The last N (`-100`) |
 | `N` | The first N (`100`) |
 | `-<duration>` | Added in the last duration (`-1h`, `-1h30m`) |
-| `<duration>` | Within that duration of the first entry (`30m`) |
+| `<duration>` | Within that duration of the first timestamped entry (`30m`) |
 | `<date>` | On that day, hour, minute or second (`2024-01-15`, `2024-01-15T14`) |
 | `<date>..<date>` | In that range, inclusive (`2024-01-01..2024-01-31`) |
 
@@ -97,6 +97,9 @@ history file based on `$SHELL`, and falls back to `~/.zsh_history`.
 write, shlog copies the file to `<histfile>.bak`, which `shlog undo` restores.
 Writes go to a temporary file that is then renamed into place, so a crash can't
 leave a half-written history.
+If the history file changes while you are confirming a deletion or cleanup,
+shlog stops and asks you to retry instead of overwriting those new entries.
+Running `undo` twice restores the state from before the first undo.
 
 ### Shell completions
 
