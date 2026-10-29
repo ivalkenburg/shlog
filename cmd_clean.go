@@ -21,22 +21,15 @@ func runClean(args []string, force, simulate, output bool, histFile string) {
 
 	// optional selection narrows which entries are considered for deduplication;
 	// entries outside the scope are always kept
-	scope := entries
-	if len(selArgs) > 0 {
-		var err error
-		scope, err = SelectEntries(entries, selArgs[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+	scope, err := selectOptionalEntries(entries, selArgs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
-	_, removed := DeduplicateEntries(scope, keepOldest)
-	remaining := InvertEntries(entries, removed)
-
-	if len(removed) == 0 {
-		fmt.Printf("No duplicates found. Total entries: %d.\n", len(entries))
-		return
+	remaining, removed := DeduplicateEntries(scope, keepOldest)
+	if len(selArgs) > 0 {
+		remaining = InvertEntries(entries, removed)
 	}
 
 	if output {
@@ -44,10 +37,13 @@ func runClean(args []string, force, simulate, output bool, histFile string) {
 		return
 	}
 
+	if len(removed) == 0 {
+		fmt.Printf("No duplicates found. Total entries: %d.\n", len(entries))
+		return
+	}
+
 	if simulate {
-		for _, e := range removed {
-			fmt.Println(e.String())
-		}
+		printEntries(removed)
 		fmt.Printf("\n(simulate) Would remove %d duplicate entries of %d total.\n", len(removed), len(entries))
 		return
 	}

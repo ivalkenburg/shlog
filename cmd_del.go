@@ -7,7 +7,8 @@ import (
 
 func runDel(args []string, force, simulate, output bool, histFile string) {
 	// parse del-specific flags: --match <pattern>, --invert, --pick, or a plain selection
-	var pattern, selection string
+	var pattern string
+	var selections []string
 	patternSet := false
 	invert := false
 	pick := false
@@ -26,11 +27,14 @@ func runDel(args []string, force, simulate, output bool, histFile string) {
 		case "--pick":
 			pick = true
 		default:
-			selection = args[i]
+			selections = append(selections, args[i])
 		}
 	}
-
-	if !pick && !patternSet && selection == "" {
+	if len(selections) > 1 {
+		fmt.Fprintln(os.Stderr, "error: del accepts at most one selection")
+		os.Exit(1)
+	}
+	if !pick && !patternSet && len(selections) == 0 {
 		fmt.Fprintln(os.Stderr, "error: missing selection, --match, or --pick argument")
 		printUsage()
 		os.Exit(1)
@@ -43,27 +47,26 @@ func runDel(args []string, force, simulate, output bool, histFile string) {
 		fmt.Fprintln(os.Stderr, "error: --pick and --match cannot be used together")
 		os.Exit(1)
 	}
+	if patternSet && len(selections) != 0 {
+		fmt.Fprintln(os.Stderr, "error: --match cannot be used with a selection")
+		os.Exit(1)
+	}
 
 	entries, original := loadHistorySnapshot(histFile)
 
 	var toDelete []*Entry
 	if pick {
-		pool := entries
-		if selection != "" {
-			var err error
-			pool, err = SelectEntries(entries, selection)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				os.Exit(1)
-			}
+		pool, err := selectOptionalEntries(entries, selections)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
 		}
-		var err error
 		toDelete, err = pickWithFzf(entries, pool, true)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		if len(toDelete) == 0 {
+		if len(toDelete) == 0 && !output {
 			fmt.Println("No entries selected.")
 			return
 		}
@@ -80,7 +83,7 @@ func runDel(args []string, force, simulate, output bool, histFile string) {
 		}
 	} else {
 		var err error
-		toDelete, err = SelectEntries(entries, selection)
+		toDelete, err = selectOptionalEntries(entries, selections)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -89,20 +92,18 @@ func runDel(args []string, force, simulate, output bool, histFile string) {
 
 	remaining := InvertEntries(entries, toDelete)
 
-	if len(toDelete) == 0 {
-		fmt.Printf("No entries matched. Total entries: %d.\n", len(entries))
-		return
-	}
-
 	if output {
 		printEntries(remaining)
 		return
 	}
 
+	if len(toDelete) == 0 {
+		fmt.Printf("No entries matched. Total entries: %d.\n", len(entries))
+		return
+	}
+
 	if simulate {
-		for _, e := range toDelete {
-			fmt.Println(e.String())
-		}
+		printEntries(toDelete)
 		fmt.Printf("\n(simulate) Would delete %d of %d entries.\n", len(toDelete), len(entries))
 		return
 	}

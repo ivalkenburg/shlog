@@ -6,8 +6,8 @@ import (
 )
 
 func runCompletion(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "error: completion requires a shell argument: zsh, bash, or fish")
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "error: completion requires exactly one shell argument: zsh, bash, or fish")
 		os.Exit(1)
 	}
 	script, err := completionScript(args[0])
@@ -41,7 +41,7 @@ _shlog() {
     '-s[simulate: show what would change without writing]' \
     '--dry-run[simulate: show what would change without writing]' \
     '-o[output: print resulting file content without writing]' \
-    '--histfile[use custom history file instead of ~/.zsh_history]:file:_files' \
+    '--histfile[use custom history file instead of default]:file:_files' \
     '1:command:->command' \
     '*::args:->args'
 
@@ -103,14 +103,17 @@ const bashCompletion = `_shlog() {
 
   # Complete --histfile argument with file paths
   if [[ "$prev" == "--histfile" ]]; then
-    COMPREPLY=($(compgen -f -- "$cur"))
+    COMPREPLY=()
+    while IFS= read -r; do
+      COMPREPLY+=("$REPLY")
+    done < <(compgen -f -- "$cur")
     return
   fi
 
   # Find the subcommand (first non-flag argument after position 0)
   local cmd=""
   local i
-  for ((i=1; i < ${#words[@]}; i++)); do
+  for ((i=1; i < cword; i++)); do
     case "${words[$i]}" in
       --histfile) ((i++)) ;;
       -*) ;;
@@ -121,17 +124,17 @@ const bashCompletion = `_shlog() {
   case "$cmd" in
     del)
       if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "--match --invert --pick $global_opts" -- "$cur"))
+        COMPREPLY=($(compgen -W "--match --invert --pick" -- "$cur"))
       fi
       ;;
     clean)
       if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "--keep-oldest $global_opts" -- "$cur"))
+        COMPREPLY=($(compgen -W "--keep-oldest" -- "$cur"))
       fi
       ;;
     pick)
       if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "--multi $global_opts" -- "$cur"))
+        COMPREPLY=($(compgen -W "--multi" -- "$cur"))
       fi
       ;;
     completion)
@@ -173,7 +176,7 @@ complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a completion -d 'p
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a version    -d 'print the current version'
 
 # del subcommand options
-complete -c shlog -n '__fish_seen_subcommand_from del'   -l match  -d 'regex pattern to match against command text'
+complete -c shlog -n '__fish_seen_subcommand_from del'   -l match -r -d 'regex pattern to match against command text'
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l invert -d 'delete entries that do NOT match (requires --match)'
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l pick   -d 'interactively select entries to delete using fzf'
 

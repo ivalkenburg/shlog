@@ -21,8 +21,9 @@ var entryHeaderRe = regexp.MustCompile(`^: (\d+):(\d+);`)
 // on short shell comments like `#123`.
 var bashTimestampRe = regexp.MustCompile(`^#(\d{10,})$`)
 
-// fishCmdRe matches the `- cmd: <command>` lines in fish history files.
-var fishCmdRe = regexp.MustCompile(`^- cmd: `)
+// Fish escapes both backslashes and newlines; decode them in a single pass so
+// an escaped literal backslash followed by "n" is not turned into a newline.
+var fishUnescaper = strings.NewReplacer(`\\`, `\`, `\n`, "\n")
 
 type histFormat int
 
@@ -63,50 +64,7 @@ func ParseHistoryFile(path string) ([]*Entry, error) {
 
 func parseHistoryData(data []byte) []*Entry {
 	lines := splitHistoryLines(data)
-	return parseHistoryLines(lines, detectFormatLines(lines))
-}
-
-// historyLines has no scanner token limit. Shell commands can exceed the
-// default 64 KiB scanner limit (and the old 4 MiB parser limit).
-func historyLines(r io.Reader) []string {
-	data, _ := io.ReadAll(r) // callers parse an already-read file or in-memory input
-	return splitHistoryLines(data)
-}
-
-func splitHistoryLines(data []byte) []string {
-	if len(data) == 0 {
-		return nil
-	}
-	lines := strings.Split(string(data), "\n")
-	if lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines
-}
-
-// detectFormat scans r and returns the history format based on the first
-// recognisable line. Returns formatBashPlain if no marker is found.
-func detectFormat(r io.Reader) histFormat {
-	return detectFormatLines(historyLines(r))
-}
-
-func detectFormatLines(lines []string) histFormat {
-	for _, line := range lines {
-		if entryHeaderRe.MatchString(line) {
-			return formatZsh
-		}
-		if bashTimestampRe.MatchString(line) {
-			return formatBashTimestamped
-		}
-		if fishCmdRe.MatchString(line) {
-			return formatFish
-		}
-	}
-	return formatBashPlain
-}
-
-func parseHistoryLines(lines []string, f histFormat) []*Entry {
-	switch f {
+	switch detectFormatLines(lines) {
 	case formatZsh:
 		return parseZshLines(lines)
 	case formatBashTimestamped:
@@ -118,8 +76,33 @@ func parseHistoryLines(lines []string, f histFormat) []*Entry {
 	}
 }
 
-func parseZshHistory(r io.Reader) []*Entry {
-	return parseZshLines(historyLines(r))
+// Split without a scanner token limit: shell commands can be arbitrarily long.
+func splitHistoryLines(data []byte) []string {
+	if len(data) == 0 {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+// detectFormatLines returns the history format based on the first
+// recognisable line. Returns formatBashPlain if no marker is found.
+func detectFormatLines(lines []string) histFormat {
+	for _, line := range lines {
+		if entryHeaderRe.MatchString(line) {
+			return formatZsh
+		}
+		if bashTimestampRe.MatchString(line) {
+			return formatBashTimestamped
+		}
+		if strings.HasPrefix(line, "- cmd: ") {
+			return formatFish
+		}
+	}
+	return formatBashPlain
 }
 
 func parseZshLines(lines []string) []*Entry {
@@ -145,15 +128,11 @@ func parseZshLines(lines []string) []*Entry {
 	return entries
 }
 
-// parseBashTimestamped parses a bash history file written with HISTTIMEFORMAT
+// parseBashTimestampedLines parses a bash history file written with HISTTIMEFORMAT
 // set. Each entry begins with a `#<unix_timestamp>` line followed by one or
 // more command lines (multi-line commands are supported via lithist).
 // Commands before the first timestamp are kept as plain entries. Bash files
 // can contain both kinds when HISTTIMEFORMAT was enabled after earlier use.
-func parseBashTimestamped(r io.Reader) []*Entry {
-	return parseBashTimestampedLines(historyLines(r))
-}
-
 func parseBashTimestampedLines(lines []string) []*Entry {
 	firstMarker := 0
 	for firstMarker < len(lines) && !bashTimestampRe.MatchString(lines[firstMarker]) {
@@ -174,21 +153,17 @@ func parseBashTimestampedLines(lines []string) []*Entry {
 	return entries
 }
 
-// parseFishHistory parses a fish history file (~/.local/share/fish/fish_history).
+// parseFishLines parses a fish history file (~/.local/share/fish/fish_history).
 // The format is YAML-like: each entry starts with `- cmd: <text>` followed by
 // `  when: <unix_timestamp>`. Multi-line commands are stored with literal `\n`
 // escape sequences on a single line. All lines until the next `- cmd: ` marker
 // belong to the current entry and are preserved verbatim in Raw for round-tripping.
-func parseFishHistory(r io.Reader) []*Entry {
-	return parseFishLines(historyLines(r))
-}
-
 func parseFishLines(lines []string) []*Entry {
 	var entries []*Entry
 	var current *Entry
 
 	for _, line := range lines {
-		if fishCmdRe.MatchString(line) {
+		if strings.HasPrefix(line, "- cmd: ") {
 			current = &Entry{Raw: []string{line}}
 			entries = append(entries, current)
 		} else if current != nil {
@@ -202,7 +177,7 @@ func parseFishLines(lines []string) []*Entry {
 	return entries
 }
 
-// parseBashPlain parses a plain bash history file (no HISTTIMEFORMAT).
+// parseBashPlainLines parses a plain bash history file (no HISTTIMEFORMAT).
 // Each non-empty line is treated as a single entry with no timestamp.
 //
 // When both cmdhist and lithist are set, bash stores multi-line commands with
@@ -212,10 +187,6 @@ func parseFishLines(lines []string) []*Entry {
 // Note: a command that genuinely ends with '\' (e.g. a sed expression) is
 // indistinguishable from a continuation marker — this is an inherent ambiguity
 // in the plain bash history format (bash itself has the same limitation).
-func parseBashPlain(r io.Reader) []*Entry {
-	return parseBashPlainLines(historyLines(r))
-}
-
 func parseBashPlainLines(lines []string) []*Entry {
 	var entries []*Entry
 	var current *Entry
@@ -253,15 +224,22 @@ func WriteHistoryFile(path string, entries []*Entry) error {
 	}
 	return atomicWrite(path, mode, func(dst io.Writer) error {
 		w := bufio.NewWriter(dst)
-		for _, e := range entries {
-			for _, line := range e.Raw {
-				if _, err := fmt.Fprintln(w, line); err != nil {
-					return err
-				}
-			}
+		if err := writeEntries(w, entries); err != nil {
+			return err
 		}
 		return w.Flush()
 	})
+}
+
+func writeEntries(w io.Writer, entries []*Entry) error {
+	for _, e := range entries {
+		for _, line := range e.Raw {
+			if _, err := fmt.Fprintln(w, line); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // ReplaceHistoryFile refuses to overwrite history changed since it was read.
@@ -384,28 +362,18 @@ func CommandText(e *Entry) string {
 	first := e.Raw[0]
 
 	// zsh extended history: strip `: <ts>:<elapsed>;` prefix from first line
-	if entryHeaderRe.MatchString(first) {
-		first = entryHeaderRe.ReplaceAllString(first, "")
-		if len(e.Raw) == 1 {
-			return first
-		}
-		parts := make([]string, len(e.Raw))
-		parts[0] = first
-		copy(parts[1:], e.Raw[1:])
-		return strings.Join(parts, "\n")
+	if header := entryHeaderRe.FindStringIndex(first); header != nil {
+		return strings.Join(e.Raw, "\n")[header[1]:]
 	}
 
 	// bash timestamped: first line is `#<ts>`, command starts at Raw[1]
 	if bashTimestampRe.MatchString(first) {
-		if len(e.Raw) < 2 {
-			return ""
-		}
 		return strings.Join(e.Raw[1:], "\n")
 	}
 
 	// fish: `- cmd: <text>` with literal \n escape sequences for multi-line commands
 	if cmd, ok := strings.CutPrefix(first, "- cmd: "); ok {
-		return strings.ReplaceAll(cmd, `\n`, "\n")
+		return fishUnescaper.Replace(cmd)
 	}
 
 	// bash plain: the line itself is the command
@@ -439,7 +407,7 @@ func InvertEntries(all, subset []*Entry) []*Entry {
 	for _, e := range subset {
 		subSet[e] = true
 	}
-	result := make([]*Entry, 0, len(all)-len(subset))
+	result := make([]*Entry, 0, max(len(all)-len(subSet), 0))
 	for _, e := range all {
 		if !subSet[e] {
 			result = append(result, e)
@@ -547,10 +515,6 @@ const errNoTimestamps = "selection %q requires timestamps, but no timestamps wer
 //	<date>..<date>      entries within the date/datetime range (inclusive)
 //	                    dates: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
 func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
-	if len(entries) == 0 {
-		return nil, nil
-	}
-
 	// Try date range: from..to
 	if idx := strings.Index(selection, ".."); idx >= 0 {
 		fromStr := selection[:idx]
@@ -562,14 +526,7 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 		if !hasTimestamps(entries) {
 			return nil, fmt.Errorf(errNoTimestamps, selection)
 		}
-		var result []*Entry
-		for _, e := range entries {
-			t := e.Time()
-			if e.Timestamp != 0 && !t.Before(from) && !t.After(to) {
-				result = append(result, e)
-			}
-		}
-		return result, nil
+		return entriesBetween(entries, from, to), nil
 	}
 
 	negative := strings.HasPrefix(selection, "-")
@@ -602,15 +559,7 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 				if !hasTimestamps(entries) {
 					return nil, fmt.Errorf(errNoTimestamps, selection)
 				}
-				to := pd.end()
-				var result []*Entry
-				for _, e := range entries {
-					t := e.Time()
-					if e.Timestamp != 0 && !t.Before(pd.t) && !t.After(to) {
-						result = append(result, e)
-					}
-				}
-				return result, nil
+				return entriesBetween(entries, pd.t, pd.end()), nil
 			}
 		}
 		return nil, fmt.Errorf("invalid selection %q: not a valid integer, duration, date, or date range (%v)", selection, err)
@@ -643,14 +592,18 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 			break
 		}
 	}
-	cutoff := start.Add(dur)
+	return entriesBetween(entries, start, start.Add(dur)), nil
+}
+
+func entriesBetween(entries []*Entry, from, to time.Time) []*Entry {
 	var result []*Entry
 	for _, e := range entries {
-		if e.Timestamp != 0 && !e.Time().After(cutoff) {
+		t := e.Time()
+		if e.Timestamp != 0 && !t.Before(from) && !t.After(to) {
 			result = append(result, e)
 		}
 	}
-	return result, nil
+	return result
 }
 
 // parsedDate holds a parsed date/datetime and the granularity of the smallest
@@ -698,6 +651,9 @@ func parseDateRange(fromStr, toStr string) (time.Time, time.Time, error) {
 	to, err := parseDateTime(toStr)
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("invalid to-date: %v", err)
+	}
+	if from.t.After(to.end()) {
+		return time.Time{}, time.Time{}, fmt.Errorf("from-date must not be after to-date")
 	}
 	return from.t, to.end(), nil
 }

@@ -22,13 +22,10 @@ func runGrep(args []string, histFile string) {
 	entries := loadHistory(histFile)
 
 	// optional selection narrows the search window
-	pool := entries
-	if len(args) > 1 {
-		pool, err = SelectEntries(entries, args[1])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+	pool, err := selectOptionalEntries(entries, args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	matched := MatchEntriesRe(pool, re)

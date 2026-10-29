@@ -1,6 +1,11 @@
 package main
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -28,7 +33,6 @@ func TestCompletionScript_Bash(t *testing.T) {
 		}
 	}
 }
-
 
 func TestCompletionScript_UnknownShell(t *testing.T) {
 	_, err := completionScript("powershell")
@@ -69,5 +73,54 @@ func TestCompletionScript_AllShellsNonEmpty(t *testing.T) {
 		if len(strings.TrimSpace(script)) == 0 {
 			t.Errorf("%s: script is empty", shell)
 		}
+	}
+}
+
+func TestBashCompletion(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is not installed")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "completion.bash")
+	if err := os.WriteFile(script, []byte(bashCompletion), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hist := filepath.Join(dir, "history with spaces")
+	if err := os.WriteFile(hist, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name  string
+		words []string
+		cword int
+		want  string
+	}{
+		{"partial command", []string{"shlog", "gr"}, 1, "grep"},
+		{"command after histfile", []string{"shlog", "--histfile", hist, "cl"}, 3, "clean"},
+		{"command before later word", []string{"shlog", "li", "unused"}, 1, "list"},
+		{"del flag", []string{"shlog", "-f", "del", "--ma"}, 3, "--match"},
+		{"global flag before command", []string{"shlog", "--dry"}, 1, "--dry-run"},
+		{"global flag after command", []string{"shlog", "del", "--dry"}, 2, ""},
+		{"shell", []string{"shlog", "completion", "fi"}, 2, "fish"},
+		{"file with spaces", []string{"shlog", "--histfile", filepath.Join(dir, "history")}, 2, hist},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := []string{"--noprofile", "--norc", "-c", `
+source "$1"
+COMP_CWORD=$2
+shift 2
+COMP_WORDS=("$@")
+_shlog
+printf '%s\n' "${COMPREPLY[@]}"
+`, "shlog-completion-test", script, strconv.Itoa(tt.cword)}
+			out, err := exec.Command(bash, append(args, tt.words...)...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("bash completion: %v\n%s", err, out)
+			}
+			if got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n"); !slices.Equal(got, []string{tt.want}) {
+				t.Fatalf("completions = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

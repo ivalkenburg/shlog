@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,23 +40,14 @@ func timestampsOf(entries []*Entry) []int64 {
 
 func writeTempHistory(t *testing.T, content string) string {
 	t.Helper()
-	f, err := os.CreateTemp("", "shlog-test-*.txt")
-	if err != nil {
+	path := filepath.Join(t.TempDir(), "history")
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString(content); err != nil {
-		f.Close()
-		t.Fatal(err)
-	}
-	f.Close()
-	t.Cleanup(func() {
-		os.Remove(f.Name())
-		os.Remove(f.Name() + ".bak")
-	})
-	return f.Name()
+	return path
 }
 
-// parseZshHistory
+// parseZshLines
 
 const singleLineHistory = `: 1000:0;echo hello
 : 1001:0;ls -la
@@ -78,7 +72,7 @@ some random line
 `
 
 func TestParseHistoryReader_SingleLine(t *testing.T) {
-	entries := parseZshHistory(strings.NewReader(singleLineHistory))
+	entries := parseZshLines(splitHistoryLines([]byte(singleLineHistory)))
 	if len(entries) != 3 {
 		t.Fatalf("expected 3 entries, got %d", len(entries))
 	}
@@ -94,7 +88,7 @@ func TestParseHistoryReader_SingleLine(t *testing.T) {
 }
 
 func TestParseHistoryReader_MultiLine(t *testing.T) {
-	entries := parseZshHistory(strings.NewReader(multiLineHistory))
+	entries := parseZshLines(splitHistoryLines([]byte(multiLineHistory)))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -111,7 +105,7 @@ func TestParseHistoryReader_MultiLine(t *testing.T) {
 }
 
 func TestParseHistoryReader_ContinuationWithBlankLine(t *testing.T) {
-	entries := parseZshHistory(strings.NewReader(continuationWithBlank))
+	entries := parseZshLines(splitHistoryLines([]byte(continuationWithBlank)))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -125,14 +119,14 @@ func TestParseHistoryReader_ContinuationWithBlankLine(t *testing.T) {
 }
 
 func TestParseHistoryReader_Empty(t *testing.T) {
-	entries := parseZshHistory(strings.NewReader(emptyHistory))
+	entries := parseZshLines(splitHistoryLines([]byte(emptyHistory)))
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries, got %d", len(entries))
 	}
 }
 
 func TestParseHistoryReader_NonEntryLinesIgnored(t *testing.T) {
-	entries := parseZshHistory(strings.NewReader(onlyNonEntryLines))
+	entries := parseZshLines(splitHistoryLines([]byte(onlyNonEntryLines)))
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries, got %d", len(entries))
 	}
@@ -140,7 +134,7 @@ func TestParseHistoryReader_NonEntryLinesIgnored(t *testing.T) {
 
 func TestParseHistoryReader_ElapsedField(t *testing.T) {
 	input := ": 5000:42;some command\n"
-	entries := parseZshHistory(strings.NewReader(input))
+	entries := parseZshLines(splitHistoryLines([]byte(input)))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -151,7 +145,7 @@ func TestParseHistoryReader_ElapsedField(t *testing.T) {
 
 func TestParseHistoryReader_PreservesRawLines(t *testing.T) {
 	input := ": 1000:0;echo hello\n: 1001:0;ls\n"
-	entries := parseZshHistory(strings.NewReader(input))
+	entries := parseZshLines(splitHistoryLines([]byte(input)))
 	if entries[0].Raw[0] != ": 1000:0;echo hello" {
 		t.Errorf("raw line not preserved: %q", entries[0].Raw[0])
 	}
@@ -166,7 +160,7 @@ sudo gem uninstall y
 : 1002:0;pwd
 `
 	path := writeTempHistory(t, original)
-	entries := parseZshHistory(strings.NewReader(original))
+	entries := parseZshLines(splitHistoryLines([]byte(original)))
 
 	if err := WriteHistoryFile(path, entries); err != nil {
 		t.Fatalf("WriteHistoryFile: %v", err)
@@ -177,7 +171,7 @@ sudo gem uninstall y
 		t.Fatal(err)
 	}
 
-	entries2 := parseZshHistory(strings.NewReader(string(written)))
+	entries2 := parseZshLines(splitHistoryLines(written))
 	if len(entries2) != len(entries) {
 		t.Fatalf("round-trip: got %d entries, want %d", len(entries2), len(entries))
 	}
@@ -353,7 +347,7 @@ func TestBackupHistoryFile_CreatesBackup(t *testing.T) {
 }
 
 func TestBackupHistoryFile_NonExistentIsNoop(t *testing.T) {
-	err := BackupHistoryFile("/tmp/hist-test-does-not-exist-xyz.txt")
+	err := BackupHistoryFile(filepath.Join(t.TempDir(), "missing"))
 	if err != nil {
 		t.Errorf("expected no error for missing file, got: %v", err)
 	}
@@ -1484,25 +1478,25 @@ pwd
 // detectFormat
 
 func TestDetectFormat_Zsh(t *testing.T) {
-	if got := detectFormat(strings.NewReader(singleLineHistory)); got != formatZsh {
+	if got := detectFormatLines(splitHistoryLines([]byte(singleLineHistory))); got != formatZsh {
 		t.Errorf("expected formatZsh, got %v", got)
 	}
 }
 
 func TestDetectFormat_BashTimestamped(t *testing.T) {
-	if got := detectFormat(strings.NewReader(bashTimestampedHistory)); got != formatBashTimestamped {
+	if got := detectFormatLines(splitHistoryLines([]byte(bashTimestampedHistory))); got != formatBashTimestamped {
 		t.Errorf("expected formatBashTimestamped, got %v", got)
 	}
 }
 
 func TestDetectFormat_BashPlain(t *testing.T) {
-	if got := detectFormat(strings.NewReader(bashPlainHistory)); got != formatBashPlain {
+	if got := detectFormatLines(splitHistoryLines([]byte(bashPlainHistory))); got != formatBashPlain {
 		t.Errorf("expected formatBashPlain, got %v", got)
 	}
 }
 
 func TestDetectFormat_Empty(t *testing.T) {
-	if got := detectFormat(strings.NewReader("")); got != formatBashPlain {
+	if got := detectFormatLines(splitHistoryLines([]byte(""))); got != formatBashPlain {
 		t.Errorf("expected formatBashPlain for empty input, got %v", got)
 	}
 }
@@ -1511,7 +1505,7 @@ func TestDetectFormat_ZshWinsOverBash(t *testing.T) {
 	// A file that starts with a zsh header should be detected as zsh even if
 	// it also contains lines that look like bash timestamps.
 	mixed := ": 1000:0;echo hello\n#1704067200\nls\n"
-	if got := detectFormat(strings.NewReader(mixed)); got != formatZsh {
+	if got := detectFormatLines(splitHistoryLines([]byte(mixed))); got != formatZsh {
 		t.Errorf("expected formatZsh, got %v", got)
 	}
 }
@@ -1519,7 +1513,7 @@ func TestDetectFormat_ZshWinsOverBash(t *testing.T) {
 // parseBashPlain
 
 func TestParseBashPlain_Basic(t *testing.T) {
-	entries := parseBashPlain(strings.NewReader(bashPlainHistory))
+	entries := parseBashPlainLines(splitHistoryLines([]byte(bashPlainHistory)))
 	if len(entries) != 3 {
 		t.Fatalf("expected 3, got %d", len(entries))
 	}
@@ -1533,14 +1527,14 @@ func TestParseBashPlain_Basic(t *testing.T) {
 
 func TestParseBashPlain_SkipsBlankLines(t *testing.T) {
 	input := "ls\n\npwd\n\n"
-	entries := parseBashPlain(strings.NewReader(input))
+	entries := parseBashPlainLines(splitHistoryLines([]byte(input)))
 	if len(entries) != 2 {
 		t.Errorf("expected 2, got %d", len(entries))
 	}
 }
 
 func TestParseBashPlain_NoTimestamps(t *testing.T) {
-	entries := parseBashPlain(strings.NewReader(bashPlainHistory))
+	entries := parseBashPlainLines(splitHistoryLines([]byte(bashPlainHistory)))
 	for _, e := range entries {
 		if e.Timestamp != 0 {
 			t.Errorf("expected zero timestamp for plain entry, got %d", e.Timestamp)
@@ -1549,7 +1543,7 @@ func TestParseBashPlain_NoTimestamps(t *testing.T) {
 }
 
 func TestParseBashPlain_RawPreserved(t *testing.T) {
-	entries := parseBashPlain(strings.NewReader("git status\n"))
+	entries := parseBashPlainLines(splitHistoryLines([]byte("git status\n")))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1, got %d", len(entries))
 	}
@@ -1559,7 +1553,7 @@ func TestParseBashPlain_RawPreserved(t *testing.T) {
 }
 
 func TestParseBashPlain_Empty(t *testing.T) {
-	entries := parseBashPlain(strings.NewReader(""))
+	entries := parseBashPlainLines(splitHistoryLines([]byte("")))
 	if len(entries) != 0 {
 		t.Errorf("expected 0, got %d", len(entries))
 	}
@@ -1573,7 +1567,7 @@ ls -la
 `
 
 func TestParseBashPlain_LithistMultiLine(t *testing.T) {
-	entries := parseBashPlain(strings.NewReader(bashPlainLithistHistory))
+	entries := parseBashPlainLines(splitHistoryLines([]byte(bashPlainLithistHistory)))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -1617,7 +1611,7 @@ func TestParseBashPlain_BlankLineBreaksContinuation(t *testing.T) {
 	// Blank line between two commands must prevent the second from being
 	// absorbed into the first even though the first ends with '\'.
 	input := "cmd1 \\\n\ncmd2\n"
-	entries := parseBashPlain(strings.NewReader(input))
+	entries := parseBashPlainLines(splitHistoryLines([]byte(input)))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -1631,7 +1625,7 @@ func TestParseBashPlain_BlankLineBreaksContinuation(t *testing.T) {
 
 func TestParseBashPlain_SingleLineContinuationOnly(t *testing.T) {
 	// A file consisting of a single backslash-only line should produce one entry.
-	entries := parseBashPlain(strings.NewReader("\\\n"))
+	entries := parseBashPlainLines(splitHistoryLines([]byte("\\\n")))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -1643,7 +1637,7 @@ func TestParseBashPlain_SingleLineContinuationOnly(t *testing.T) {
 func TestParseBashPlain_NoContinuationRegression(t *testing.T) {
 	// Files without any backslash-terminated lines must behave identically
 	// to the old implementation: one entry per non-blank line.
-	entries := parseBashPlain(strings.NewReader(bashPlainHistory))
+	entries := parseBashPlainLines(splitHistoryLines([]byte(bashPlainHistory)))
 	if len(entries) != 3 {
 		t.Fatalf("expected 3 entries, got %d", len(entries))
 	}
@@ -1652,7 +1646,7 @@ func TestParseBashPlain_NoContinuationRegression(t *testing.T) {
 // parseBashTimestamped
 
 func TestParseBashTimestamped_Basic(t *testing.T) {
-	entries := parseBashTimestamped(strings.NewReader(bashTimestampedHistory))
+	entries := parseBashTimestampedLines(splitHistoryLines([]byte(bashTimestampedHistory)))
 	if len(entries) != 3 {
 		t.Fatalf("expected 3, got %d", len(entries))
 	}
@@ -1665,7 +1659,7 @@ func TestParseBashTimestamped_Basic(t *testing.T) {
 }
 
 func TestParseBashTimestamped_MultiLine(t *testing.T) {
-	entries := parseBashTimestamped(strings.NewReader(bashTimestampedMultiLine))
+	entries := parseBashTimestampedLines(splitHistoryLines([]byte(bashTimestampedMultiLine)))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2, got %d", len(entries))
 	}
@@ -1682,7 +1676,7 @@ func TestParseBashTimestamped_MultiLine(t *testing.T) {
 
 func TestParseBashTimestamped_PreservesCommandsBeforeFirstTimestamp(t *testing.T) {
 	input := "earlier command\n#1704067200\nls\n"
-	entries := parseBashTimestamped(strings.NewReader(input))
+	entries := parseBashTimestampedLines(splitHistoryLines([]byte(input)))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2, got %d", len(entries))
 	}
@@ -1696,7 +1690,7 @@ func TestParseBashTimestamped_PreservesCommandsBeforeFirstTimestamp(t *testing.T
 
 func TestParseBashTimestamped_RawIncludesTimestampLine(t *testing.T) {
 	input := "#1704067200\nls -la\n"
-	entries := parseBashTimestamped(strings.NewReader(input))
+	entries := parseBashTimestampedLines(splitHistoryLines([]byte(input)))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1, got %d", len(entries))
 	}
@@ -1709,7 +1703,7 @@ func TestParseBashTimestamped_RawIncludesTimestampLine(t *testing.T) {
 }
 
 func TestParseBashTimestamped_Empty(t *testing.T) {
-	entries := parseBashTimestamped(strings.NewReader(""))
+	entries := parseBashTimestampedLines(splitHistoryLines([]byte("")))
 	if len(entries) != 0 {
 		t.Errorf("expected 0, got %d", len(entries))
 	}
@@ -2004,7 +1998,7 @@ const fishHistoryWithPaths = `- cmd: cd /tmp
 // detectFormat - fish
 
 func TestDetectFormat_Fish(t *testing.T) {
-	if got := detectFormat(strings.NewReader(fishHistory)); got != formatFish {
+	if got := detectFormatLines(splitHistoryLines([]byte(fishHistory))); got != formatFish {
 		t.Errorf("expected formatFish, got %v", got)
 	}
 }
@@ -2012,7 +2006,7 @@ func TestDetectFormat_Fish(t *testing.T) {
 // parseFishHistory
 
 func TestParseFishHistory_Basic(t *testing.T) {
-	entries := parseFishHistory(strings.NewReader(fishHistory))
+	entries := parseFishLines(splitHistoryLines([]byte(fishHistory)))
 	if len(entries) != 3 {
 		t.Fatalf("expected 3 entries, got %d", len(entries))
 	}
@@ -2025,7 +2019,7 @@ func TestParseFishHistory_Basic(t *testing.T) {
 }
 
 func TestParseFishHistory_CommandText(t *testing.T) {
-	entries := parseFishHistory(strings.NewReader(fishHistory))
+	entries := parseFishLines(splitHistoryLines([]byte(fishHistory)))
 	if CommandText(entries[0]) != "echo hello" {
 		t.Errorf("entry[0] cmd = %q, want %q", CommandText(entries[0]), "echo hello")
 	}
@@ -2035,7 +2029,7 @@ func TestParseFishHistory_CommandText(t *testing.T) {
 }
 
 func TestParseFishHistory_MultiLineCmd(t *testing.T) {
-	entries := parseFishHistory(strings.NewReader(fishHistoryMultiLine))
+	entries := parseFishLines(splitHistoryLines([]byte(fishHistoryMultiLine)))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -2046,7 +2040,7 @@ func TestParseFishHistory_MultiLineCmd(t *testing.T) {
 }
 
 func TestParseFishHistory_RawPreserved(t *testing.T) {
-	entries := parseFishHistory(strings.NewReader(fishHistory))
+	entries := parseFishLines(splitHistoryLines([]byte(fishHistory)))
 	if entries[0].Raw[0] != "- cmd: echo hello" {
 		t.Errorf("raw[0] not preserved: %q", entries[0].Raw[0])
 	}
@@ -2056,7 +2050,7 @@ func TestParseFishHistory_RawPreserved(t *testing.T) {
 }
 
 func TestParseFishHistory_WithPaths(t *testing.T) {
-	entries := parseFishHistory(strings.NewReader(fishHistoryWithPaths))
+	entries := parseFishLines(splitHistoryLines([]byte(fishHistoryWithPaths)))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d: paths section should not start a new entry", len(entries))
 	}
@@ -2067,7 +2061,7 @@ func TestParseFishHistory_WithPaths(t *testing.T) {
 
 func TestParseFishHistory_NoWhen(t *testing.T) {
 	input := "- cmd: ls -la\n- cmd: pwd\n"
-	entries := parseFishHistory(strings.NewReader(input))
+	entries := parseFishLines(splitHistoryLines([]byte(input)))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -2077,7 +2071,7 @@ func TestParseFishHistory_NoWhen(t *testing.T) {
 }
 
 func TestParseFishHistory_Empty(t *testing.T) {
-	entries := parseFishHistory(strings.NewReader(""))
+	entries := parseFishLines(splitHistoryLines([]byte("")))
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries, got %d", len(entries))
 	}
@@ -2141,5 +2135,97 @@ func TestWriteHistoryFile_RoundTrip_Fish(t *testing.T) {
 		if CommandText(entries[i]) != CommandText(entries2[i]) {
 			t.Errorf("entry[%d] cmd mismatch: %q vs %q", i, CommandText(entries[i]), CommandText(entries2[i]))
 		}
+	}
+}
+
+func TestCommandTextFishEscapes(t *testing.T) {
+	for _, tt := range []struct {
+		raw, want string
+	}{
+		{`printf '\\n'`, `printf '\n'`},
+		{`echo C:\\new\\path`, `echo C:\new\path`},
+		{`echo first\necho second`, "echo first\necho second"},
+		{`echo \\\nnext`, "echo \\\nnext"},
+		{`echo \\\\`, `echo \\`},
+	} {
+		t.Run(tt.raw, func(t *testing.T) {
+			entry := &Entry{Raw: []string{"- cmd: " + tt.raw}}
+			if got := CommandText(entry); got != tt.want {
+				t.Errorf("CommandText = %q, want %q", got, tt.want)
+			}
+			if entry.Raw[0] != "- cmd: "+tt.raw {
+				t.Fatal("decoding modified the original entry")
+			}
+		})
+	}
+}
+
+func TestSelectEntriesUnorderedTimestamps(t *testing.T) {
+	entries := makeEntries(10000, 9000, 11800, 13600, 13601)
+	got, err := SelectEntries(entries, "1h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []*Entry{entries[0], entries[2], entries[3]}) {
+		t.Fatalf("selected timestamps %v; want [10000 11800 13600]", timestampsOf(got))
+	}
+}
+
+func TestSelectEntriesRejectsInvalidSelectionsOnEmptyHistory(t *testing.T) {
+	for _, selection := range []string{"", "typo", "0", "-0", "--1", "0h", "2024-02-01..2024-01-01"} {
+		if _, err := SelectEntries(nil, selection); err == nil {
+			t.Errorf("expected error for %q on empty history", selection)
+		}
+	}
+}
+
+func TestSelectEntriesReversedDateRange(t *testing.T) {
+	if _, err := SelectEntries(makeEntries(1704067200), "2024-02-01..2024-01-01"); err == nil {
+		t.Fatal("expected an error for a reversed date range")
+	}
+}
+
+func TestInvertEntriesRepeatedAndForeignPointers(t *testing.T) {
+	all := makeEntries(1, 2)
+	subset := []*Entry{all[0], all[0], entryWithCmd(1, "other"), all[0]}
+	if got := InvertEntries(all, subset); !slices.Equal(got, all[1:]) {
+		t.Errorf("InvertEntries = %v, want only the second entry", timestampsOf(got))
+	}
+}
+
+func TestAtomicWriteFailurePreservesFile(t *testing.T) {
+	path := writeTempHistory(t, "original\n")
+	writeErr := errors.New("injected write failure")
+	err := atomicWrite(path, 0600, func(w io.Writer) error {
+		if _, err := io.WriteString(w, "partial replacement"); err != nil {
+			t.Fatal(err)
+		}
+		return writeErr
+	})
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("atomicWrite error = %v, want %v", err, writeErr)
+	}
+	assertFileContent(t, path, "original\n")
+	files, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Name() != filepath.Base(path) {
+		t.Fatalf("failed write left temporary files: %v", files)
+	}
+}
+
+func TestWriteHistoryFileRejectsBrokenSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "missing")
+	link := filepath.Join(dir, "history")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteHistoryFile(link, makeEntries(1)); err == nil {
+		t.Fatal("expected an error for a broken symlink")
+	}
+	if got, err := os.Readlink(link); err != nil || got != target {
+		t.Fatalf("broken symlink was replaced: target=%q, err=%v", got, err)
 	}
 }

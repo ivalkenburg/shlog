@@ -3,21 +3,16 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
 func runStats(args []string, histFile string) {
 	entries := loadHistory(histFile)
 
-	scope := entries
-	if len(args) > 0 {
-		var err error
-		scope, err = SelectEntries(entries, args[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+	scope, err := selectOptionalEntries(entries, args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	if len(scope) == 0 {
@@ -35,7 +30,7 @@ func runStats(args []string, histFile string) {
 		if firstTS == 0 || e.Timestamp < firstTS {
 			firstTS = e.Timestamp
 		}
-		if e.Timestamp > lastTS {
+		if lastTS == 0 || e.Timestamp > lastTS {
 			lastTS = e.Timestamp
 		}
 	}
@@ -47,17 +42,10 @@ func runStats(args []string, histFile string) {
 		fmt.Printf("Entries: %d  Unique: %d\n\n", stats.Total, stats.Unique)
 	}
 
-	if len(stats.TopN) == 0 {
-		return
-	}
 	countWidth := len(fmt.Sprintf("%d", stats.TopN[0].Count))
 	rankWidth := len(fmt.Sprintf("%d", len(stats.TopN)))
 	fmt.Printf("Top %d commands:\n", len(stats.TopN))
 	for i, cc := range stats.TopN {
-		cmd := cc.Command
-		if idx := strings.Index(cmd, "\n"); idx != -1 {
-			cmd = cmd[:idx] + " ↵"
-		}
-		fmt.Printf("  %*d.  %*d  %s\n", rankWidth, i+1, countWidth, cc.Count, cmd)
+		fmt.Printf("  %*d.  %*d  %s\n", rankWidth, i+1, countWidth, cc.Count, commandPreview(cc.Command))
 	}
 }

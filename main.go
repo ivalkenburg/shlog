@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -60,12 +61,20 @@ doneFlags:
 	case "stats":
 		runStats(args[1:], histFile)
 	case "undo":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "error: undo does not accept arguments")
+			os.Exit(1)
+		}
 		runUndo(force, simulate, output, histFile)
 	case "pick":
 		runPick(args[1:], histFile)
 	case "completion":
 		runCompletion(args[1:])
 	case "version":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "error: version does not accept arguments")
+			os.Exit(1)
+		}
 		fmt.Println(version)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", args[0])
@@ -73,8 +82,6 @@ doneFlags:
 		os.Exit(1)
 	}
 }
-
-// helpers
 
 func loadHistory(histFile string) []*Entry {
 	entries, _ := loadHistorySnapshot(histFile)
@@ -113,14 +120,38 @@ func confirm(force bool, prompt string) bool {
 }
 
 func printEntries(entries []*Entry) {
-	for _, e := range entries {
-		fmt.Println(e.String())
+	w := bufio.NewWriter(os.Stdout)
+	err := writeEntries(w, entries)
+	if err == nil {
+		err = w.Flush()
 	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error writing output: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func selectOptionalEntries(entries []*Entry, args []string) ([]*Entry, error) {
+	if len(args) > 1 {
+		return nil, fmt.Errorf("expected at most one selection, got %d", len(args))
+	}
+	if len(args) == 0 {
+		return entries, nil
+	}
+	return SelectEntries(entries, args[0])
 }
 
 // printIndexed prints a subset of entries showing their index in the full history.
 // If highlight is non-nil and color output is enabled, matched text is highlighted.
 func printIndexed(all, toShow []*Entry, highlight *regexp.Regexp) {
+	if err := writeIndexed(os.Stdout, all, toShow, highlight, colorEnabled); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing output: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// writeIndexed is shared by terminal output and fzf's input, which never uses color.
+func writeIndexed(w io.Writer, all, toShow []*Entry, highlight *regexp.Regexp, color bool) error {
 	indexOf := make(map[*Entry]int, len(all))
 	for i, e := range all {
 		indexOf[e] = i + 1 // 1-based
@@ -133,18 +164,25 @@ func printIndexed(all, toShow []*Entry, highlight *regexp.Regexp) {
 		} else {
 			ts = e.Time().Format(time.DateTime)
 		}
-		cmd := CommandText(e)
-		if idx := strings.Index(cmd, "\n"); idx != -1 {
-			cmd = cmd[:idx] + " ↵"
-		}
-		if colorEnabled {
+		cmd := commandPreview(CommandText(e))
+		if color {
 			ts = colorDim(ts)
 			if highlight != nil {
 				cmd = colorHighlightMatches(cmd, highlight)
 			}
 		}
-		fmt.Printf("%*d  %s  %s\n", width, indexOf[e], ts, cmd)
+		if _, err := fmt.Fprintf(w, "%*d  %s  %s\n", width, indexOf[e], ts, cmd); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func commandPreview(cmd string) string {
+	if first, _, multiline := strings.Cut(cmd, "\n"); multiline {
+		return first + " ↵"
+	}
+	return cmd
 }
 
 func defaultHistoryFilePath() string {
@@ -153,10 +191,7 @@ func defaultHistoryFilePath() string {
 	if p := os.Getenv("HISTFILE"); p != "" {
 		return p
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = os.Getenv("HOME")
-	}
+	home, _ := os.UserHomeDir()
 	// $SHELL reflects the login shell set by the OS, so it works even when
 	// the binary is invoked from a different shell session.
 	shell := os.Getenv("SHELL")
@@ -220,14 +255,14 @@ Commands:
   pick [<selection>]              interactively pick entries and print their commands (requires fzf)
   pick --multi [<selection>]      pick multiple entries
   undo                            restore history from the last backup
-  completion <shell>              print shell completion script (zsh, bash)
+  completion <shell>              print shell completion script (zsh, bash, fish)
   version                         print the current version
 
 Options:
   -f              force: never ask for confirmation
   -s, --dry-run   simulate: only output what would be changed
   -o              output: print what the history file would look like (no write, no confirmation)
-  --histfile <p>  use <p> instead of ~/.zsh_history
+  --histfile <p>  use <p> instead of the default history file
 
 Selections (for del, clean, list, grep, pick, and stats):
   -N              last N entries (e.g. -1, -100)
@@ -258,7 +293,7 @@ Examples:
   shlog grep "docker" -1h                show 'docker' entries from the last hour
   shlog grep "^aws (s3|ec2)"             show entries matching pattern
   shlog stats                            show overall history statistics
-  shlog stats -7d                        show statistics for the last 7 days
+  shlog stats -168h                      show statistics for the last 7 days
   shlog pick                             interactively pick an entry and print its command
   shlog pick --multi                     pick multiple entries
   shlog pick -1h                         pick from entries in the last hour

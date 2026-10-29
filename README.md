@@ -59,6 +59,8 @@ shlog [options] <command> [args]
 | `-o` | Print what the file would contain afterwards, without writing |
 | `--histfile <path>` | Use another history file |
 
+`-o` takes precedence over `-s` and `--dry-run`.
+
 A selection narrows a command to part of the history:
 
 | Selection | Entries |
@@ -72,6 +74,8 @@ A selection narrows a command to part of the history:
 
 Time and date selections need timestamps, so they don't work on a plain bash
 history file. Set `HISTTIMEFORMAT` in bash to get them.
+Each command accepts at most one selection. `del --match` cannot be combined
+with a selection.
 
 ### Examples
 

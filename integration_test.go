@@ -1,17 +1,27 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // binaryPath holds the path to the compiled shlog binary built by TestMain.
 var binaryPath string
 
 func TestMain(m *testing.M) {
+	os.Exit(runTests(m))
+}
+
+func runTests(m *testing.M) int {
 	tmp, err := os.MkdirTemp("", "shlog-integ-*")
 	if err != nil {
 		panic("failed to create temp dir for binary: " + err.Error())
@@ -23,7 +33,7 @@ func TestMain(m *testing.M) {
 		panic("failed to build binary: " + string(out))
 	}
 
-	os.Exit(m.Run())
+	return m.Run()
 }
 
 // runGoshist runs the compiled binary with the given arguments and returns
@@ -343,9 +353,7 @@ func TestCleanKeepOldest_vs_Default(t *testing.T) {
 // TestDelPick_NoFzf verifies that del --pick returns a clear error when fzf
 // is not available.
 func TestDelPick_NoFzf(t *testing.T) {
-	if fzfAvailable() {
-		t.Skip("fzf is installed; skipping no-fzf error test")
-	}
+	t.Setenv("PATH", t.TempDir())
 	hist := writeTempHistory(t, singleLineHistory)
 	out, err := runGoshist(t, "--histfile", hist, "del", "--pick")
 	if err == nil {
@@ -359,9 +367,7 @@ func TestDelPick_NoFzf(t *testing.T) {
 // TestPick_NoFzf verifies that pick returns a clear error when fzf is not
 // available.
 func TestPick_NoFzf(t *testing.T) {
-	if fzfAvailable() {
-		t.Skip("fzf is installed; skipping no-fzf error test")
-	}
+	t.Setenv("PATH", t.TempDir())
 	hist := writeTempHistory(t, singleLineHistory)
 	out, err := runGoshist(t, "--histfile", hist, "pick")
 	if err == nil {
@@ -516,5 +522,279 @@ func TestCompletionSubcommand_Fish(t *testing.T) {
 	}
 	if !strings.Contains(out, "complete -c shlog") {
 		t.Errorf("fish completion missing 'complete -c shlog', got: %s", out)
+	}
+}
+
+func TestOutputOverridesDryRun(t *testing.T) {
+	for _, tt := range []struct {
+		name, content, want string
+		args                []string
+	}{
+		{"del", "ls\npwd\nls\n", "ls\npwd\n", []string{"del", "-1"}},
+		{"clean", "ls\npwd\nls\n", "pwd\nls\n", []string{"clean"}},
+		{"del no match", singleLineHistory, singleLineHistory, []string{"del", "--match", "never matches"}},
+		{"clean no duplicates", singleLineHistory, singleLineHistory, []string{"clean"}},
+		{"del empty", "", "", []string{"del", "-1"}},
+		{"clean empty", "", "", []string{"clean"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			hist := writeTempHistory(t, tt.content)
+			if err := os.WriteFile(hist+".bak", []byte("previous backup\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			args := append([]string{"--histfile", hist, "-s", "-o"}, tt.args...)
+			out, err := runGoshist(t, args...)
+			if err != nil {
+				t.Fatalf("command failed: %v\n%s", err, out)
+			}
+			if out != tt.want {
+				t.Fatalf("output = %q, want %q", out, tt.want)
+			}
+			assertFileContent(t, hist, tt.content)
+			assertFileContent(t, hist+".bak", "previous backup\n")
+		})
+	}
+}
+
+func TestInvalidArgumentsDoNotWrite(t *testing.T) {
+	for _, args := range [][]string{
+		{"del"}, {"del", "1", "2"}, {"del", "--match"},
+		{"del", "--invert", "1"}, {"del", "--pick", "--match", "ls"},
+		{"del", "--match", "ls", "1"}, {"del", "--match", "["},
+		{"clean", "1", "2"}, {"clean", "--keep-oldest", "1", "2"},
+		{"list", "1", "2"}, {"grep"}, {"grep", "["}, {"grep", "ls", "1", "2"},
+		{"stats", "1", "2"}, {"pick", "--multi", "1", "2"},
+		{"undo", "1"}, {"version", "extra"}, {"completion", "bash", "extra"},
+		{"list", "0"}, {"list", "2024-02-01..2024-01-01"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			hist := writeTempHistory(t, singleLineHistory)
+			out, err := runGoshist(t, append([]string{"--histfile", hist, "-f"}, args...)...)
+			if err == nil || !strings.Contains(out, "error:") {
+				t.Fatalf("expected an argument error, got %v\n%s", err, out)
+			}
+			assertFileContent(t, hist, singleLineHistory)
+			assertNoBackup(t, hist)
+		})
+	}
+}
+
+func TestConfirmation(t *testing.T) {
+	for _, command := range []string{"del", "clean", "undo"} {
+		for _, answer := range []string{"n\n", "", " YES \n"} {
+			t.Run(command+"/"+strings.TrimSpace(answer), func(t *testing.T) {
+				original := "ls\npwd\nls\n"
+				hist := writeTempHistory(t, original)
+				args := []string{"--histfile", hist, command}
+				want := "pwd\nls\n"
+				if command == "del" {
+					args = append(args, "-1")
+					want = "ls\npwd\n"
+				} else if command == "undo" {
+					want = "backup\n"
+					if err := os.WriteFile(hist+".bak", []byte(want), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cmd := exec.Command(binaryPath, args...)
+				cmd.Stdin = strings.NewReader(answer)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("confirmation: %v\n%s", err, out)
+				}
+				if !strings.Contains(string(out), "[y/N]") {
+					t.Fatalf("confirmation prompt missing: %s", out)
+				}
+				if answer == " YES \n" {
+					assertFileContent(t, hist, want)
+					assertFileContent(t, hist+".bak", original)
+				} else {
+					assertFileContent(t, hist, original)
+					if command == "undo" {
+						assertFileContent(t, hist+".bak", want)
+					} else {
+						assertNoBackup(t, hist)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestHistoryChangedDuringConfirmation(t *testing.T) {
+	for _, args := range [][]string{{"del", "-1"}, {"clean"}} {
+		t.Run(args[0], func(t *testing.T) {
+			original := "ls\npwd\nls\n"
+			hist := writeTempHistory(t, original)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, binaryPath, append([]string{"--histfile", hist}, args...)...)
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { cancel(); cmd.Wait() })
+			if _, err := bufio.NewReader(stdout).ReadString('?'); err != nil {
+				t.Fatalf("waiting for confirmation prompt: %v", err)
+			}
+			updated := original + "appended by shell\n"
+			if err := os.WriteFile(hist, []byte(updated), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(stdin, "yes\n"); err != nil {
+				t.Fatal(err)
+			}
+			stdin.Close()
+			if _, err := io.Copy(io.Discard, stdout); err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Wait(); err == nil || !strings.Contains(stderr.String(), "changed since it was read") {
+				t.Fatalf("expected a history conflict: %v\n%s", err, &stderr)
+			}
+			assertFileContent(t, hist, updated)
+			assertNoBackup(t, hist)
+		})
+	}
+}
+
+func TestCleanScoped(t *testing.T) {
+	for _, keepOldest := range []bool{false, true} {
+		t.Run(fmt.Sprint(keepOldest), func(t *testing.T) {
+			original := ": 1000:0;ls\n: 1001:0;ls\n: 1002:0;pwd\n: 1003:0;ls\n"
+			hist := writeTempHistory(t, original)
+			args := []string{"--histfile", hist, "-f", "clean", "-3"}
+			want := ": 1000:0;ls\n: 1002:0;pwd\n: 1003:0;ls\n"
+			if keepOldest {
+				args = append(args, "--keep-oldest")
+				want = ": 1000:0;ls\n: 1001:0;ls\n: 1002:0;pwd\n"
+			}
+			if out, err := runGoshist(t, args...); err != nil {
+				t.Fatalf("scoped clean: %v\n%s", err, out)
+			}
+			assertFileContent(t, hist, want)
+			assertFileContent(t, hist+".bak", original)
+		})
+	}
+}
+
+func TestPickPrintsFullCommandAndDelPickDeletesWholeEntry(t *testing.T) {
+	fakeFzf(t, "/bin/cat\n")
+	original := ": 1000:0;keep\n: 1001:0;first line\nsecond line\n"
+	hist := writeTempHistory(t, original)
+	out, err := runGoshist(t, "--histfile", hist, "pick", "-1")
+	if err != nil || out != "first line\nsecond line\n" {
+		t.Fatalf("pick output = %q, err=%v", out, err)
+	}
+	assertFileContent(t, hist, original)
+	assertNoBackup(t, hist)
+	if out, err := runGoshist(t, "--histfile", hist, "-f", "del", "--pick", "-1"); err != nil {
+		t.Fatalf("del --pick: %v\n%s", err, out)
+	}
+	assertFileContent(t, hist, ": 1000:0;keep\n")
+	assertFileContent(t, hist+".bak", original)
+}
+
+func TestDelPickCancelledOutput(t *testing.T) {
+	fakeFzf(t, "/bin/cat > /dev/null\nexit 130\n")
+	hist := writeTempHistory(t, singleLineHistory)
+	out, err := runGoshist(t, "--histfile", hist, "-o", "del", "--pick")
+	if err != nil || out != singleLineHistory {
+		t.Fatalf("cancelled pick output = %q, err=%v", out, err)
+	}
+	assertFileContent(t, hist, singleLineHistory)
+	assertNoBackup(t, hist)
+}
+
+func TestStatsBeforeUnixEpoch(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	hist := writeTempHistory(t, "- cmd: ls\n  when: -86400\n- cmd: pwd\n  when: -1\n")
+	out, err := runGoshist(t, "--histfile", hist, "stats")
+	if err != nil || !strings.Contains(out, "Date range: 1969-12-31 to 1969-12-31") {
+		t.Fatalf("stats date range: %v\n%s", err, out)
+	}
+}
+
+func TestDelMatchAndInvert(t *testing.T) {
+	original := ": 1000:0;aws s3 ls\ncontinuation\n: 1001:0;pwd\n: 1002:0;aws ec2 help\n"
+	for _, tt := range []struct {
+		name, pattern, want string
+		invert              bool
+	}{
+		{"match", "^aws ", ": 1001:0;pwd\n", false},
+		{"invert", "^aws ", ": 1000:0;aws s3 ls\ncontinuation\n: 1002:0;aws ec2 help\n", true},
+		{"empty", "", "", false},
+		{"invert empty", "", original, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			hist := writeTempHistory(t, original)
+			args := []string{"--histfile", hist, "-f", "del", "--match", tt.pattern}
+			if tt.invert {
+				args = append(args, "--invert")
+			}
+			if out, err := runGoshist(t, args...); err != nil {
+				t.Fatalf("del match: %v\n%s", err, out)
+			}
+			assertFileContent(t, hist, tt.want)
+			if tt.want == original {
+				assertNoBackup(t, hist)
+			} else {
+				assertFileContent(t, hist+".bak", original)
+			}
+		})
+	}
+}
+
+func TestGrepScopedPreservesHistoryIndex(t *testing.T) {
+	hist := writeTempHistory(t, "echo first\npwd\necho last\n")
+	out, err := runGoshist(t, "--histfile", hist, "grep", "echo", "-2")
+	if err != nil || out != "3  —  echo last\n" {
+		t.Fatalf("scoped grep output = %q, err=%v", out, err)
+	}
+	assertNoBackup(t, hist)
+}
+
+func TestDelPickIgnoresPrintedQuery(t *testing.T) {
+	fakeFzf(t, "printf '1\\n'\n/bin/cat\n")
+	hist := writeTempHistory(t, "keep me\necho 1\n")
+	out, err := runGoshist(t, "--histfile", hist, "-o", "del", "--pick", "-1")
+	if err != nil || out != "keep me\n" {
+		t.Fatalf("printed query changed deletion scope: output=%q, error=%v", out, err)
+	}
+	assertFileContent(t, hist, "keep me\necho 1\n")
+	assertNoBackup(t, hist)
+}
+
+func TestHistoryOutputReportsWriteFailure(t *testing.T) {
+	for _, args := range [][]string{
+		{"-o", "del", "-1"}, {"-o", "clean"},
+		{"-s", "del", "-1"}, {"-s", "clean"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			original := "ls\npwd\nls\n"
+			hist := writeTempHistory(t, original)
+			readOnly, err := os.Open(hist)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer readOnly.Close()
+			cmd := exec.Command(binaryPath, append([]string{"--histfile", hist}, args...)...)
+			cmd.Stdout = readOnly
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err == nil || !strings.Contains(stderr.String(), "error writing output") {
+				t.Fatalf("failed output was not reported: error=%v, stderr=%s", err, &stderr)
+			}
+			assertFileContent(t, hist, original)
+			assertNoBackup(t, hist)
+		})
 	}
 }
