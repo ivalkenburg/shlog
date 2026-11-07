@@ -84,3 +84,15 @@ func TestColorDisabledForNonTerminal(t *testing.T) {
 		t.Fatalf("piped output contains ANSI escapes: %q", out)
 	}
 }
+
+func TestColorHighlightSkipsEmptyMatches(t *testing.T) {
+	for _, pattern := range []string{"^", "x*", ""} {
+		if got := colorHighlightMatches("abc", regexp.MustCompile(pattern)); got != "abc" {
+			t.Errorf("pattern %q: got %q, want unchanged", pattern, got)
+		}
+	}
+	want := "a" + ansiBold + ansiGreen + "bb" + ansiReset + "c"
+	if got := colorHighlightMatches("abbc", regexp.MustCompile("b*")); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -125,10 +126,10 @@ func TestParseHistoryReader_Empty(t *testing.T) {
 	}
 }
 
-func TestParseHistoryReader_NonEntryLinesIgnored(t *testing.T) {
+func TestParseHistoryReader_LinesWithoutHeaderAreEntries(t *testing.T) {
 	entries := parseZshLines(splitHistoryLines([]byte(onlyNonEntryLines)))
-	if len(entries) != 0 {
-		t.Errorf("expected 0 entries, got %d", len(entries))
+	if len(entries) != 2 || entries[0].Timestamp != 0 || CommandText(entries[1]) != "some random line" {
+		t.Errorf("expected 2 untimestamped entries, got %d", len(entries))
 	}
 }
 
@@ -1197,8 +1198,10 @@ func TestCommandText_SingleLine(t *testing.T) {
 }
 
 func TestCommandText_MultiLine(t *testing.T) {
-	e := &Entry{Raw: []string{": 1000:0;cmd arg1 \\", "arg2 \\", "arg3"}}
-	want := "cmd arg1 \\\narg2 \\\narg3"
+	// zsh writes a backslash before each newline of a command; it is not part
+	// of the command, but a backslash the user typed is kept.
+	e := &Entry{Raw: []string{": 1000:0;cmd arg1 \\\\", "arg2\\", "arg3"}}
+	want := "cmd arg1 \\\narg2\narg3"
 	if got := CommandText(e); got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -2227,5 +2230,50 @@ func TestWriteHistoryFileRejectsBrokenSymlink(t *testing.T) {
 	}
 	if got, err := os.Readlink(link); err != nil || got != target {
 		t.Fatalf("broken symlink was replaced: target=%q, err=%v", got, err)
+	}
+}
+
+func TestCommandText_ZshMetafied(t *testing.T) {
+	// zsh writes "\u2014" (e2 80 94) as e2 80 83 b4; "é" has no metafied bytes.
+	e := &Entry{Raw: []string{": 1:0;echo \xe2\x80\x83\xb4 \xc3\xa9"}}
+	if got := CommandText(e); got != "echo — é" {
+		t.Errorf("got %q, want %q", got, "echo — é")
+	}
+}
+
+func TestCommandText_ZshTrailingMetaByteKept(t *testing.T) {
+	e := &Entry{Raw: []string{": 1:0;echo \x83"}}
+	if got := CommandText(e); got != "echo \x83" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestParseZsh_MixedPlainAndExtended(t *testing.T) {
+	input := "plain one\nplain two\\\ncontinued\n: 1000:0;timed\n\nafter blank\n: 1001:0;multi\\\nline\n"
+	entries := parseHistoryData([]byte(input))
+	wantCmds := []string{"plain one", "plain two\ncontinued", "timed", "after blank", "multi\nline"}
+	wantTS := []int64{0, 0, 1000, 0, 1001}
+	if len(entries) != len(wantCmds) {
+		t.Fatalf("got %d entries, want %d", len(entries), len(wantCmds))
+	}
+	for i, e := range entries {
+		if got := CommandText(e); got != wantCmds[i] || e.Timestamp != wantTS[i] {
+			t.Errorf("entry %d = (%d, %q), want (%d, %q)", i, e.Timestamp, got, wantTS[i], wantCmds[i])
+		}
+	}
+	var out bytes.Buffer
+	if err := writeEntries(&out, entries); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != input {
+		t.Errorf("round trip = %q, want %q", out.String(), input)
+	}
+}
+
+func TestDeduplicateEntries_ZshTimestampedAndPlain(t *testing.T) {
+	entries := parseHistoryData([]byte("ls\n: 1000:0;ls\n"))
+	keep, removed := DeduplicateEntries(entries, false)
+	if len(keep) != 1 || len(removed) != 1 || keep[0].Timestamp != 1000 {
+		t.Errorf("keep %v, removed %v", timestampsOf(keep), timestampsOf(removed))
 	}
 }

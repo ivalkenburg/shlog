@@ -42,6 +42,7 @@ _shlog() {
     '--dry-run[simulate: show what would change without writing]' \
     '-o[output: print resulting file content without writing]' \
     '--histfile[use custom history file instead of default]:file:_files' \
+    '(- *)'{-h,--help}'[print help]' \
     '1:command:->command' \
     '*::args:->args'
 
@@ -57,6 +58,7 @@ _shlog() {
         'undo:restore history from last backup'
         'completion:print shell completion script'
         'version:print the current version'
+        'help:print help'
       )
       _describe 'command' commands
       ;;
@@ -98,8 +100,8 @@ const bashCompletion = `_shlog() {
     cword=$COMP_CWORD
   }
 
-  local commands="del clean list grep stats pick undo completion version"
-  local global_opts="-f -s --dry-run -o --histfile"
+  local commands="del clean list grep stats pick undo completion version help"
+  local global_opts="-f -s --dry-run -o --histfile -h --help"
 
   # Complete --histfile argument with file paths
   if [[ "$prev" == "--histfile" ]]; then
@@ -162,9 +164,10 @@ complete -c shlog -s s -d 'simulate: show what would change without writing'
 complete -c shlog -l dry-run -d 'simulate: show what would change without writing'
 complete -c shlog -s o -d 'output: print resulting file content without writing'
 complete -c shlog -l histfile -r -d 'use custom history file instead of default'
+complete -c shlog -s h -l help -d 'print help'
 
 # Commands (only when no subcommand has been given yet)
-set -l cmds del clean list grep stats pick undo completion version
+set -l cmds del clean list grep stats pick undo completion version help
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a del        -d 'delete entries matching a selection or pattern'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a clean      -d 'remove duplicate entries'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a list       -d 'print entries with index and timestamp'
@@ -174,6 +177,7 @@ complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a pick       -d 'i
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a undo       -d 'restore history from last backup'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a completion -d 'print shell completion script'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a version    -d 'print the current version'
+complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a help       -d 'print help'
 
 # del subcommand options
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l match -r -d 'regex pattern to match against command text'

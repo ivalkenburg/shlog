@@ -124,3 +124,52 @@ printf '%s\n' "${COMPREPLY[@]}"
 		})
 	}
 }
+
+// usageCommands returns the command names listed in the usage text.
+func usageCommands(t *testing.T) []string {
+	t.Helper()
+	_, rest, _ := strings.Cut(usage, "Commands:\n")
+	section, _, _ := strings.Cut(rest, "\n\n")
+	var cmds []string
+	for line := range strings.SplitSeq(section, "\n") {
+		if f := strings.Fields(line); len(f) > 0 && !slices.Contains(cmds, f[0]) {
+			cmds = append(cmds, f[0])
+		}
+	}
+	if len(cmds) == 0 {
+		t.Fatal("no commands found in usage")
+	}
+	return cmds
+}
+
+func TestCompletionsListEveryCommand(t *testing.T) {
+	cmds := usageCommands(t)
+	for _, cmd := range cmds {
+		if !strings.Contains(zshCompletion, "'"+cmd+":") {
+			t.Errorf("zsh completion missing command %q", cmd)
+		}
+		if !strings.Contains(fishCompletion, "-a "+cmd+" ") {
+			t.Errorf("fish completion missing command %q", cmd)
+		}
+	}
+	_, rest, _ := strings.Cut(bashCompletion, `local commands="`)
+	bashCmds, _, _ := strings.Cut(rest, `"`)
+	got := strings.Fields(bashCmds)
+	slices.Sort(got)
+	slices.Sort(cmds)
+	if !slices.Equal(got, cmds) {
+		t.Errorf("bash commands = %v, usage commands = %v", got, cmds)
+	}
+}
+
+func TestZshCompletionSyntax(t *testing.T) {
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh is not installed")
+	}
+	cmd := exec.Command(zsh, "-n")
+	cmd.Stdin = strings.NewReader(zshCompletion)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("zsh -n: %v\n%s", err, out)
+	}
+}

@@ -51,6 +51,7 @@ shlog [options] <command> [args]
 | `undo` | Restore the file from the last backup |
 | `completion <shell>` | Print a completion script for zsh, bash or fish |
 | `version` | Print the version |
+| `help` | Print usage |
 
 | Option | What it does |
 | --- | --- |
@@ -58,6 +59,7 @@ shlog [options] <command> [args]
 | `-s`, `--dry-run` | Show which entries would be removed, without writing |
 | `-o` | Print what the file would contain afterwards, without writing |
 | `--histfile <path>` | Use another history file |
+| `-h`, `--help` | Print usage |
 
 `-o` takes precedence over `-s` and `--dry-run`.
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ type Entry struct {
 	Timestamp int64
 	Elapsed   int64
 	Raw       []string // original lines, preserving exact content
+	zsh       bool     // read from a zsh file; CommandText decodes zsh escaping
 }
 
 func (e *Entry) Time() time.Time {
@@ -105,6 +107,11 @@ func detectFormatLines(lines []string) histFormat {
 	return formatBashPlain
 }
 
+// parseZshLines parses zsh history. zsh ends every line of a multi-line
+// command except the last with a backslash. A line without a `: ts:elapsed;`
+// header that does not continue the previous line is an entry without a
+// timestamp, which zsh writes when EXTENDED_HISTORY is off. Blank lines stay
+// with the preceding entry so they are written back unchanged.
 func parseZshLines(lines []string) []*Entry {
 	var entries []*Entry
 	var current *Entry
@@ -117,15 +124,51 @@ func parseZshLines(lines []string) []*Entry {
 				Timestamp: ts,
 				Elapsed:   elapsed,
 				Raw:       []string{line},
+				zsh:       true,
 			}
 			entries = append(entries, current)
-		} else if current != nil {
+		} else if current != nil && (line == "" || strings.HasSuffix(current.Raw[len(current.Raw)-1], `\`)) {
 			current.Raw = append(current.Raw, line)
+		} else if line != "" {
+			current = &Entry{Raw: []string{line}, zsh: true}
+			entries = append(entries, current)
 		}
-		// lines before first entry are silently ignored
 	}
 
 	return entries
+}
+
+// zshMeta prefixes bytes that zsh stores XORed with 0x20 ("metafied") in its
+// history file, such as some UTF-8 continuation bytes.
+const zshMeta = 0x83
+
+// zshCommandText decodes the command lines of a zsh entry: the backslash
+// before each newline is removed and metafied bytes are restored. Blank lines
+// kept after the command are not part of it.
+func zshCommandText(lines []string) string {
+	var b strings.Builder
+	for i, line := range lines {
+		if i == len(lines)-1 || !strings.HasSuffix(line, `\`) {
+			b.WriteString(line)
+			break
+		}
+		b.WriteString(line[:len(line)-1])
+		b.WriteByte('\n')
+	}
+	s := b.String()
+	if strings.IndexByte(s, zshMeta) < 0 {
+		return s
+	}
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == zshMeta && i+1 < len(s) {
+			i++
+			c = s[i] ^ 0x20
+		}
+		out = append(out, c)
+	}
+	return string(out)
 }
 
 // parseBashTimestampedLines parses a bash history file written with HISTTIMEFORMAT
@@ -361,9 +404,14 @@ func CommandText(e *Entry) string {
 	}
 	first := e.Raw[0]
 
-	// zsh extended history: strip `: <ts>:<elapsed>;` prefix from first line
+	// zsh: strip `: <ts>:<elapsed>;` prefix from first line, then decode
 	if header := entryHeaderRe.FindStringIndex(first); header != nil {
-		return strings.Join(e.Raw, "\n")[header[1]:]
+		lines := slices.Clone(e.Raw)
+		lines[0] = first[header[1]:]
+		return zshCommandText(lines)
+	}
+	if e.zsh {
+		return zshCommandText(e.Raw)
 	}
 
 	// bash timestamped: first line is `#<ts>`, command starts at Raw[1]
@@ -516,9 +564,7 @@ const errNoTimestamps = "selection %q requires timestamps, but no timestamps wer
 //	                    dates: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
 func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 	// Try date range: from..to
-	if idx := strings.Index(selection, ".."); idx >= 0 {
-		fromStr := selection[:idx]
-		toStr := selection[idx+2:]
+	if fromStr, toStr, ok := strings.Cut(selection, ".."); ok {
 		from, to, err := parseDateRange(fromStr, toStr)
 		if err != nil {
 			return nil, err

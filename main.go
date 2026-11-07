@@ -30,6 +30,9 @@ func main() {
 			simulate = true
 		case "-o":
 			output = true
+		case "-h", "--help":
+			fmt.Println(usage)
+			return
 		case "--histfile":
 			if len(args) < 2 {
 				fmt.Fprintln(os.Stderr, "error: --histfile requires a path argument")
@@ -70,6 +73,12 @@ doneFlags:
 		runPick(args[1:], histFile)
 	case "completion":
 		runCompletion(args[1:])
+	case "help":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "error: help does not accept arguments")
+			os.Exit(1)
+		}
+		fmt.Println(usage)
 	case "version":
 		if len(args) != 1 {
 			fmt.Fprintln(os.Stderr, "error: version does not accept arguments")
@@ -144,7 +153,12 @@ func selectOptionalEntries(entries []*Entry, args []string) ([]*Entry, error) {
 // printIndexed prints a subset of entries showing their index in the full history.
 // If highlight is non-nil and color output is enabled, matched text is highlighted.
 func printIndexed(all, toShow []*Entry, highlight *regexp.Regexp) {
-	if err := writeIndexed(os.Stdout, all, toShow, highlight, colorEnabled); err != nil {
+	w := bufio.NewWriter(os.Stdout)
+	err := writeIndexed(w, all, toShow, highlight, colorEnabled)
+	if err == nil {
+		err = w.Flush()
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error writing output: %v\n", err)
 		os.Exit(1)
 	}
@@ -235,12 +249,18 @@ func colorDim(s string) string {
 
 func colorHighlightMatches(s string, re *regexp.Regexp) string {
 	return re.ReplaceAllStringFunc(s, func(m string) string {
+		if m == "" {
+			return m // patterns like `^` or `x*` would otherwise wrap every gap
+		}
 		return ansiBold + ansiGreen + m + ansiReset
 	})
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `Usage: shlog [options] <command> [args]
+	fmt.Fprintln(os.Stderr, usage)
+}
+
+const usage = `Usage: shlog [options] <command> [args]
 
 Commands:
   del <selection>                 delete entries matching selection
@@ -257,12 +277,14 @@ Commands:
   undo                            restore history from the last backup
   completion <shell>              print shell completion script (zsh, bash, fish)
   version                         print the current version
+  help                            print this help
 
 Options:
   -f              force: never ask for confirmation
   -s, --dry-run   simulate: only output what would be changed
   -o              output: print what the history file would look like (no write, no confirmation)
   --histfile <p>  use <p> instead of the default history file
+  -h, --help      print this help
 
 Selections (for del, clean, list, grep, pick, and stats):
   -N              last N entries (e.g. -1, -100)
@@ -298,5 +320,4 @@ Examples:
   shlog pick --multi                     pick multiple entries
   shlog pick -1h                         pick from entries in the last hour
   shlog undo                             restore history from last backup
-  shlog --histfile /tmp/hist list        inspect a custom history file`)
-}
+  shlog --histfile /tmp/hist list        inspect a custom history file`

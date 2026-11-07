@@ -24,7 +24,7 @@ Detected on every read:
 
 | Format | Detected by |
 | --- | --- |
-| zsh extended | `: <ts>:<elapsed>;<cmd>`; continuation lines join the entry |
+| zsh | `: <ts>:<elapsed>;<cmd>`; lines ending in `\` continue the entry (zsh escapes newlines this way); lines without a header are untimestamped entries; command text is unmetafied |
 | bash timestamped | `#<unix ts>` (10+ digits) lines; lines until the next marker are one entry |
 | bash plain | fallback; backslash-newline continuations are one entry; no timestamps, so time/date selections error |
 | fish | `- cmd: <text>` + `  when: <ts>`; multi-line stored as literal `\n` |

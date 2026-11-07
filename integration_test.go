@@ -566,6 +566,7 @@ func TestInvalidArgumentsDoNotWrite(t *testing.T) {
 		{"stats", "1", "2"}, {"pick", "--multi", "1", "2"},
 		{"undo", "1"}, {"version", "extra"}, {"completion", "bash", "extra"},
 		{"list", "0"}, {"list", "2024-02-01..2024-01-01"},
+		{"bogus"}, {"help", "extra"}, {"--histfile"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			hist := writeTempHistory(t, singleLineHistory)
@@ -688,7 +689,7 @@ func TestCleanScoped(t *testing.T) {
 
 func TestPickPrintsFullCommandAndDelPickDeletesWholeEntry(t *testing.T) {
 	fakeFzf(t, "/bin/cat\n")
-	original := ": 1000:0;keep\n: 1001:0;first line\nsecond line\n"
+	original := ": 1000:0;keep\n: 1001:0;first line\\\nsecond line\n"
 	hist := writeTempHistory(t, original)
 	out, err := runGoshist(t, "--histfile", hist, "pick", "-1")
 	if err != nil || out != "first line\nsecond line\n" {
@@ -724,13 +725,13 @@ func TestStatsBeforeUnixEpoch(t *testing.T) {
 }
 
 func TestDelMatchAndInvert(t *testing.T) {
-	original := ": 1000:0;aws s3 ls\ncontinuation\n: 1001:0;pwd\n: 1002:0;aws ec2 help\n"
+	original := ": 1000:0;aws s3 ls\\\ncontinuation\n: 1001:0;pwd\n: 1002:0;aws ec2 help\n"
 	for _, tt := range []struct {
 		name, pattern, want string
 		invert              bool
 	}{
 		{"match", "^aws ", ": 1001:0;pwd\n", false},
-		{"invert", "^aws ", ": 1000:0;aws s3 ls\ncontinuation\n: 1002:0;aws ec2 help\n", true},
+		{"invert", "^aws ", ": 1000:0;aws s3 ls\\\ncontinuation\n: 1002:0;aws ec2 help\n", true},
 		{"empty", "", "", false},
 		{"invert empty", "", original, true},
 	} {
@@ -797,4 +798,51 @@ func TestHistoryOutputReportsWriteFailure(t *testing.T) {
 			assertNoBackup(t, hist)
 		})
 	}
+}
+
+func TestHelpAndVersion(t *testing.T) {
+	for _, args := range [][]string{{"-h"}, {"--help"}, {"help"}, {"-f", "--help", "del"}, {"version"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			cmd := exec.Command(binaryPath, args...)
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil || stderr.Len() != 0 {
+				t.Fatalf("%v: err=%v stderr=%q", args, err, stderr.String())
+			}
+			want := "Usage: shlog"
+			if args[0] == "version" {
+				want = "dev\n"
+			}
+			if !strings.HasPrefix(stdout.String(), want) {
+				t.Fatalf("%v: stdout = %q, want prefix %q", args, stdout.String(), want)
+			}
+		})
+	}
+}
+
+func TestZshEntriesWithoutTimestampsArePreserved(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	original := "old plain\n: 1000:0;timed\nlater plain\n"
+	hist := writeTempHistory(t, original)
+	out, err := runGoshist(t, "--histfile", hist, "list")
+	if want := "1  —  old plain\n2  1970-01-01 00:16:40  timed\n3  —  later plain\n"; err != nil || out != want {
+		t.Fatalf("list = %q, err=%v; want %q", out, err, want)
+	}
+	if out, err := runGoshist(t, "--histfile", hist, "-f", "del", "-1"); err != nil {
+		t.Fatalf("del: %v\n%s", err, out)
+	}
+	assertFileContent(t, hist, "old plain\n: 1000:0;timed\n")
+	assertFileContent(t, hist+".bak", original)
+}
+
+func TestPickDecodesZshCommand(t *testing.T) {
+	fakeFzf(t, "/bin/cat\n")
+	// Bytes as zsh writes them: "\u2014" is metafied and each newline is escaped.
+	original := ": 1000:0;for x in \xe2\x80\x83\xb4\\\ndo echo $x\\\ndone\n"
+	hist := writeTempHistory(t, original)
+	out, err := runGoshist(t, "--histfile", hist, "pick")
+	if want := "for x in —\ndo echo $x\ndone\n"; err != nil || out != want {
+		t.Fatalf("pick = %q, err=%v; want %q", out, err, want)
+	}
+	assertFileContent(t, hist, original)
 }
