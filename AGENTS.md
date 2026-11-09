@@ -38,6 +38,10 @@ Default file: `$HISTFILE` → fish file if `$SHELL` contains fish → `~/.bash_h
 - Entries keep their original lines (`Entry.Raw`) and are written back unchanged. Don't reformat them.
 - Color only on a TTY; respect `NO_COLOR` and `TERM=dumb`.
 
+## Commits
+
+Use Conventional Commit messages: `type: description` or `type(scope): description`.
+
 ## Releasing
 
 1. Push a `vX.Y.Z` tag. `.github/workflows/release.yml` builds `shlog-{darwin,linux}-{amd64,arm64}` with `main.version=X.Y.Z` and creates the release.
