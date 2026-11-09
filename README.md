@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/shlog-wordmark.png" alt="shlog — a terminal prompt inside a history arrow, beside the shlog wordmark" width="640">
+</p>
+
 # shlog
 
 A command-line tool for reading and cleaning up your shell history.
