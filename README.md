@@ -39,7 +39,7 @@ Interactive picking is built in on macOS and Linux. No additional tools are requ
 ## Usage
 
 ```
-shlog [options] <command> [args]
+shlog [options] <command> [args] [options]
 ```
 
 | Command | What it does |
@@ -51,7 +51,7 @@ shlog [options] <command> [args]
 | `del --match <pattern> [--invert]` | Delete entries that match (or don't match) a regex |
 | `del --pick [<selection>]` | Interactively choose entries to delete |
 | `clean [--keep-oldest] [<selection>]` | Remove duplicates, keeping the newest (or oldest) copy |
-| `pick [--multi] [<selection>]` | Interactively choose entries and print their commands |
+| `pick [--multi] [--unique] [--sort <order>] [<selection>]` | Interactively choose entries and print their commands |
 | `undo` | Restore the file from the last backup |
 | `completion <shell>` | Print a completion script for zsh, bash or fish |
 | `version` | Print the version |
@@ -65,6 +65,12 @@ shlog [options] <command> [args]
 | `--histfile <path>` | Use another history file |
 | `-h`, `--help` | Print usage |
 
+Options can appear before or after the command: `shlog clean --dry-run` and
+`shlog --dry-run clean` are equivalent. Negative selections such as `-20` and
+`-1h` keep their existing meaning. Use `--` to stop option parsing, for example
+`shlog grep -- '-f'`. Values following `--match` and `--histfile` are taken
+literally, even when they resemble flags.
+
 `-o` takes precedence over `-s` and `--dry-run`.
 
 A selection narrows a command to part of the history:
@@ -77,6 +83,10 @@ A selection narrows a command to part of the history:
 | `<duration>` | Within that duration of the first timestamped entry (`30m`) |
 | `<date>` | On that day, hour, minute or second (`2024-01-15`, `2024-01-15T14`) |
 | `<date>..<date>` | In that range, inclusive (`2024-01-01..2024-01-31`) |
+
+Dates use local calendar time. Nonexistent times during daylight-saving changes
+are rejected; repeated hours, minutes, and seconds include both occurrences.
+Durations use elapsed time. Fractional seconds are not accepted in date selections.
 
 Time and date selections need timestamps, so they don't work on a plain bash
 history file. Set `HISTTIMEFORMAT` in bash to get them.
@@ -98,7 +108,23 @@ eval "$(shlog pick)"             # pick a command and run it again
 ### Interactive picker
 
 `pick` and `del --pick` open a full-screen picker with compact command rows and a
-scrollable command preview below. Results stay newest-first. Each row shows the
+scrollable command preview below. Results default to newest-first. Click the
+`[ newest first ]` control in the header or press Ctrl-S to cycle through newest,
+relevance, and frequency sorting. Start in a specific mode with
+`pick --sort newest|relevance|frequency` or `del --pick --sort <order>`.
+Relevance ranks the best search alignments first, breaking ties by shorter command
+length and then recency. Empty queries and queries containing only exclusions
+keep newest-first order in relevance mode. Frequency ranks exact command text by
+its occurrence count within the selection, breaking ties by recency.
+Changing sorting preserves focus and marked entries.
+
+Use `pick --unique` to show one row per exact command, represented by its latest
+occurrence in the selection. Rows show occurrence counts and the latest entry's
+index and timestamp; frequency sorting also shows counts without grouping.
+`del --pick` always exposes individual occurrences so deleting one does not delete
+all copies. Unique mode can be combined with `--multi` and any sort order.
+
+Each row shows the
 original history index and timestamp when the terminal is wide enough; the
 preview shows the full timestamp. Search covers the complete command, including
 multiline content, rather than the displayed index or timestamp.
@@ -150,8 +176,8 @@ it does not correct spelling mistakes or transpositions.
 Lowercase terms ignore case. A term containing uppercase is case-sensitive, so
 `Git main` requires `Git` but allows `MAIN`. Unaccented Latin terms also match
 accented letters (`cafe` matches `café`); explicitly accented terms preserve that
-distinction. Match quality determines highlighting, while result order stays
-newest-first.
+distinction. Match quality determines highlighting and relevance ranking; newest-first remains
+the default sort order.
 
 The search prompt supports Left/Right, Home/End or Ctrl-A/Ctrl-E,
 Backspace/Delete, Ctrl-U to clear, and Ctrl-W to erase the previous word.
@@ -163,6 +189,21 @@ Interaction uses the controlling terminal, keeping stdout available for command
 substitution and redirection. The picker requires a capable terminal at least
 30 columns wide and 10 rows high. Without a controlling terminal, or with
 `TERM=dumb`, use `list`, `grep`, or `del --match` for noninteractive work.
+
+### Exit statuses
+
+| Status | Meaning |
+| --- | --- |
+| `0` | Success, including `clean` finding no duplicates and `-o` producing an unchanged file |
+| `1` | No matching entries for `list`, `grep`, `stats`, `pick`, or `del` |
+| `2` | Invalid arguments, file/output errors, or unavailable terminal |
+| `130` | Picker canceled with Esc/Ctrl-C/SIGINT, or confirmation declined (including end of input) |
+
+An empty picker selection returns `1` without opening the terminal. A query with
+no results leaves the picker open so it can be revised or canceled. Canceling
+`del --pick`, including with `-o`, produces no output and never writes a file.
+With `-o`, successfully producing the resulting file returns `0` even when no
+entries would be removed.
 
 ### Which file it edits
 

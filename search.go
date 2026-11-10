@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -200,6 +201,40 @@ func (q searchQuery) matches(s searchText) bool {
 	return true
 }
 
+func (q searchQuery) hasPositiveTerms() bool {
+	for _, group := range q.groups {
+		for _, t := range group {
+			if !t.negative {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Use the same best alignment as highlighting. Exclusions constrain membership
+// but do not improve rank; each OR group contributes its best positive match.
+func (q searchQuery) score(ctx context.Context, s searchText, work *searchWorkspace) (int, bool) {
+	total := 0
+	for _, group := range q.groups {
+		best, found := 0, false
+		for _, t := range group {
+			if t.negative || !t.matches(s) {
+				continue
+			}
+			_, score, ok := work.align(ctx, t, s, false)
+			if !ok {
+				return 0, false
+			}
+			if !found || score > best {
+				best, found = score, true
+			}
+		}
+		total += best
+	}
+	return total, ctx.Err() == nil
+}
+
 func wordIndex(s, word string) int {
 	for offset := 0; offset <= len(s); {
 		i := strings.Index(s[offset:], word)
@@ -225,8 +260,8 @@ func wordRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) || r == '_'
 }
 
-// positions is only needed for visible rows and the focused preview. Filtering
-// the full history uses allocation-free membership checks instead.
+// Highlight positions are only needed for visible rows and the focused preview.
+// Relevance sorting reuses a workspace to compute scores without traceback.
 func (q searchQuery) positions(s searchText) []int {
 	var positions []int
 	for _, group := range q.groups {
@@ -247,12 +282,33 @@ func (q searchQuery) positions(s searchText) []int {
 	return slices.Compact(positions)
 }
 
+// searchWorkspace reuses normalization and DP buffers across scored entries.
+// Traceback and returned positions are allocated only for visible highlights.
+type searchWorkspace struct {
+	raw, hay, needle           []rune
+	indices, previous, current []int
+}
+
 func (t searchTerm) positions(s searchText) ([]int, int) {
-	raw := []rune(s.text)
-	hay := make([]rune, 0, len(raw))
-	indices := make([]int, 0, len(raw))
+	var work searchWorkspace
+	p, score, _ := work.align(context.Background(), t, s, true)
+	return p, score
+}
+
+func (w *searchWorkspace) align(ctx context.Context, t searchTerm, s searchText, positions bool) ([]int, int, bool) {
+	w.raw = w.raw[:0]
+	for _, r := range s.text {
+		if len(w.raw)%4096 == 0 && ctx.Err() != nil {
+			return nil, 0, false
+		}
+		w.raw = append(w.raw, r)
+	}
+	w.hay, w.indices = w.hay[:0], w.indices[:0]
 	latin := false
-	for i, r := range raw {
+	for i, r := range w.raw {
+		if i%4096 == 0 && ctx.Err() != nil {
+			return nil, 0, false
+		}
 		if t.normalize {
 			if r < utf8.RuneSelf {
 				latin = asciiLetter(r)
@@ -269,15 +325,22 @@ func (t searchTerm) positions(s searchText) ([]int, int) {
 		if !t.sensitive {
 			r = unicode.ToLower(r)
 		}
-		hay, indices = append(hay, r), append(indices, i)
+		w.hay, w.indices = append(w.hay, r), append(w.indices, i)
 	}
-	needle := []rune(t.text)
+	w.needle = w.needle[:0]
+	for _, r := range t.text {
+		w.needle = append(w.needle, r)
+	}
 	var p []int
 	score := 0
 	if t.fuzzy {
-		p, score = alignFuzzy(hay, needle, raw, indices)
+		var ok bool
+		p, score, ok = w.alignFuzzy(ctx, positions)
+		if !ok {
+			return nil, 0, false
+		}
 	} else {
-		view := string(hay)
+		view := string(w.hay)
 		at := strings.Index(view, t.text)
 		if t.prefix {
 			at = 0
@@ -288,15 +351,23 @@ func (t searchTerm) positions(s searchText) ([]int, int) {
 		}
 		if at >= 0 {
 			start := utf8.RuneCountInString(view[:at])
-			for i := range needle {
-				p = append(p, start+i)
+			for i := range w.needle {
+				index := start + i
+				if positions {
+					p = append(p, index)
+				}
+				if i == 0 {
+					score = 16 + 2*alignmentBonus(w.raw, w.indices[index]) - index
+				} else {
+					score += 24 + alignmentBonus(w.raw, w.indices[index])
+				}
 			}
 		}
 	}
 	for i := range p {
-		p[i] = indices[p[i]]
+		p[i] = w.indices[p[i]]
 	}
-	return p, score
+	return p, score, ctx.Err() == nil
 }
 
 func alignmentBonus(raw []rune, at int) int {
@@ -312,33 +383,50 @@ func alignmentBonus(raw []rune, at int) int {
 // Dynamic programming maximizes boundary/contiguous bonuses and penalizes gaps.
 // Limit trace memory on pathological commands, as terminal previews can contain
 // arbitrarily long history entries. Membership is exact in both paths.
-func alignFuzzy(hay, needle, raw []rune, indices []int) ([]int, int) {
+func (w *searchWorkspace) alignFuzzy(ctx context.Context, positions bool) ([]int, int, bool) {
+	hay, needle, raw, indices := w.hay, w.needle, w.raw, w.indices
 	n, m := len(hay), len(needle)
 	if m == 0 || n < m {
-		return nil, 0
+		return nil, 0, true
 	}
 	if n > 2_000_000/m {
 		var p []int
 		j := 0
 		for i, r := range hay {
+			if i%4096 == 0 && ctx.Err() != nil {
+				return nil, 0, false
+			}
 			if r == needle[j] {
-				p = append(p, i)
+				if positions {
+					p = append(p, i)
+				}
 				j++
 				if j == m {
-					return p, 0
+					return p, 0, true
 				}
 			}
 		}
-		return nil, 0
+		return nil, 0, true
 	}
 	const impossible = -1 << 28
-	prev, current := make([]int, n), make([]int, n)
-	trace := make([]int32, n*m)
+	w.previous = resizeSearchBuffer(w.previous, n)
+	w.current = resizeSearchBuffer(w.current, n)
+	prev, current := w.previous, w.current
+	clear(prev)
+	var trace []int32
+	if positions {
+		trace = make([]int32, n*m)
+	}
 	for j, r := range needle {
 		best, bestAt := impossible, -1
 		for i, c := range hay {
+			if i%4096 == 0 && ctx.Err() != nil {
+				return nil, 0, false
+			}
 			current[i] = impossible
-			trace[j*n+i] = -1
+			if positions {
+				trace[j*n+i] = -1
+			}
 			if c == r {
 				bonus := alignmentBonus(raw, indices[i])
 				if j == 0 {
@@ -346,11 +434,15 @@ func alignFuzzy(hay, needle, raw []rune, indices []int) ([]int, int) {
 				} else {
 					if bestAt >= 0 {
 						current[i] = best - 3*i + 16 + bonus
-						trace[j*n+i] = int32(bestAt)
+						if positions {
+							trace[j*n+i] = int32(bestAt)
+						}
 					}
 					if i > 0 && prev[i-1] > impossible && prev[i-1]+24+bonus > current[i] {
 						current[i] = prev[i-1] + 24 + bonus
-						trace[j*n+i] = int32(i - 1)
+						if positions {
+							trace[j*n+i] = int32(i - 1)
+						}
 					}
 				}
 			}
@@ -367,14 +459,24 @@ func alignFuzzy(hay, needle, raw []rune, indices []int) ([]int, int) {
 		}
 	}
 	if at < 0 {
-		return nil, 0
+		return nil, 0, true
+	}
+	if !positions {
+		return nil, score, true
 	}
 	p := make([]int, m)
 	for j := m - 1; j >= 0; j-- {
 		p[j] = at
 		at = int(trace[j*n+at])
 	}
-	return p, score
+	return p, score, true
+}
+
+func resizeSearchBuffer(buffer []int, n int) []int {
+	if cap(buffer) < n {
+		return make([]int, n)
+	}
+	return buffer[:n]
 }
 
 func foldLatin(s string) string {

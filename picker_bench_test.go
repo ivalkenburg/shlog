@@ -22,7 +22,7 @@ func benchmarkPicker(lines, lineBytes int) *pickerModel {
 	if lineBytes > 0 {
 		m.setQuery("gco")
 	}
-	matches, _ := filterPicker(context.Background(), m.items, m.query)
+	matches, _ := filterPicker(context.Background(), m.items, m.query, m.options.sort)
 	m.applyMatches(matches, -1)
 	m.render(true)
 	return m
@@ -81,5 +81,22 @@ func BenchmarkPickerRenderLongLine(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		m.render(true)
+	}
+}
+
+func BenchmarkPickerSort10K(b *testing.B) {
+	entries := make([]*Entry, 10_000)
+	for i := range entries {
+		entries[i] = &Entry{Raw: []string{fmt.Sprintf("git checkout feature/%d && go test ./... # café", i)}}
+	}
+	m := newPickerModel(entries, entries, pickerOptions{})
+	q, _ := parseSearch("gco cafe")
+	for _, order := range []pickerSort{pickerNewest, pickerRelevance, pickerFrequency} {
+		b.Run(string(order), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				filterPicker(context.Background(), m.items, q, order)
+			}
+		})
 	}
 }

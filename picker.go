@@ -2,21 +2,53 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
+var errPickerCanceled = errors.New("picker canceled")
+
+type pickerSort string
+
+const (
+	pickerNewest    pickerSort = "newest"
+	pickerRelevance pickerSort = "relevance"
+	pickerFrequency pickerSort = "frequency"
+)
+
+func pickerSortArgument(args []string, at *int) (pickerSort, error) {
+	_, value, inline := strings.Cut(args[*at], "=")
+	if !inline {
+		if *at+1 == len(args) {
+			return "", fmt.Errorf("--sort requires newest, relevance, or frequency")
+		}
+		*at += 1
+		value = args[*at]
+	}
+	switch order := pickerSort(value); order {
+	case pickerNewest, pickerRelevance, pickerFrequency:
+		return order, nil
+	default:
+		return "", fmt.Errorf("invalid sort %q: expected newest, relevance, or frequency", value)
+	}
+}
+
 type pickerOptions struct {
-	multi, deleting bool
-	path            string
+	multi, deleting, unique bool
+	path                    string
+	sort                    pickerSort
 }
 
 type pickerItem struct {
 	entry *Entry
 	index int
 	text  searchText
+	count int
 }
 
 type pickerModel struct {
@@ -31,6 +63,7 @@ type pickerModel struct {
 	queryErr      error
 	searching     bool
 	acceptPending bool
+	searchFocus   int
 	previewScroll int
 	help          bool
 	helpScroll    int
@@ -48,7 +81,10 @@ func pickEntries(all, pool []*Entry, options pickerOptions) ([]*Entry, error) {
 }
 
 func newPickerModel(all, pool []*Entry, options pickerOptions) *pickerModel {
-	m := &pickerModel{options: options, marked: make(map[int]bool), width: 80, height: 24, lastClickItem: -1}
+	if options.sort == "" {
+		options.sort = pickerNewest
+	}
+	m := &pickerModel{options: options, marked: make(map[int]bool), width: 80, height: 24, lastClickItem: -1, searchFocus: -1}
 	m.items = make([]pickerItem, 0, min(len(pool), len(all)))
 	m.matches = make([]int, 0, cap(m.items))
 	allInPool := slices.Equal(all, pool)
@@ -59,13 +95,53 @@ func newPickerModel(all, pool []*Entry, options pickerOptions) *pickerModel {
 			inPool[e] = true
 		}
 	}
+	counts := make(map[string]int, len(pool))
 	for i := len(all) - 1; i >= 0; i-- {
 		if allInPool || inPool[all[i]] {
-			m.items = append(m.items, pickerItem{all[i], i + 1, newSearchText(CommandText(all[i]))})
+			text := CommandText(all[i])
+			counts[text]++
+			if options.unique && counts[text] > 1 {
+				continue
+			}
+			m.items = append(m.items, pickerItem{entry: all[i], index: i + 1, text: newSearchText(text)})
 			m.matches = append(m.matches, len(m.items)-1)
 		}
 	}
+	for i := range m.items {
+		m.items[i].count = counts[m.items[i].text.text]
+	}
+	if options.sort == pickerFrequency {
+		m.matches, _ = filterPicker(context.Background(), m.items, searchQuery{}, options.sort)
+	}
 	return m
+}
+
+func (m *pickerModel) cycleSort() {
+	switch m.options.sort {
+	case pickerNewest:
+		m.options.sort = pickerRelevance
+	case pickerRelevance:
+		m.options.sort = pickerFrequency
+	default:
+		m.options.sort = pickerNewest
+	}
+}
+
+// The control is right-aligned in the header, leaving the wrap column unused.
+func (m *pickerModel) sortControl() (string, int) {
+	label := "[ newest first ]"
+	switch m.options.sort {
+	case pickerRelevance:
+		label = "[ relevance ]"
+	case pickerFrequency:
+		label = "[ most used first ]"
+	}
+	return label, m.width - 1 - len(label)
+}
+
+func (m *pickerModel) clickedSort(e pickerEvent) bool {
+	_, start := m.sortControl()
+	return !m.help && e.mouseButton == 0 && e.y == 0 && e.x >= start && e.x < m.width-1
 }
 
 func (m *pickerModel) listRows() int    { return max(1, m.height-max(2, m.height/4)-7) }
@@ -129,13 +205,17 @@ func (m *pickerModel) setQuery(text string) {
 	m.renderCache.preview = nil
 }
 
-func filterPicker(ctx context.Context, items []pickerItem, q searchQuery) ([]int, bool) {
+func filterPicker(ctx context.Context, items []pickerItem, q searchQuery, order pickerSort) ([]int, bool) {
 	if ctx.Err() != nil {
 		return nil, false
 	}
 	var matches []int
+	type rank struct{ score, length int }
+	var ranks []rank
+	var work searchWorkspace
+	rankMatches := order == pickerRelevance && q.hasPositiveTerms()
 	for i := range items {
-		if i%128 == 0 {
+		if rankMatches || i%128 == 0 {
 			select {
 			case <-ctx.Done():
 				return nil, false
@@ -147,9 +227,36 @@ func filterPicker(ctx context.Context, items []pickerItem, q searchQuery) ([]int
 				matches = make([]int, 0, len(items))
 			}
 			matches = append(matches, i)
+			if rankMatches {
+				if ranks == nil {
+					ranks = make([]rank, len(items))
+				}
+				score, ok := q.score(ctx, items[i].text, &work)
+				if !ok {
+					return nil, false
+				}
+				ranks[i] = rank{score, utf8.RuneCountInString(items[i].text.text)}
+			}
 		}
 	}
-	return matches, true
+	if order == pickerFrequency || ranks != nil {
+		slices.SortFunc(matches, func(a, b int) int {
+			if order == pickerFrequency {
+				if d := items[b].count - items[a].count; d != 0 {
+					return d
+				}
+			} else {
+				if d := ranks[b].score - ranks[a].score; d != 0 {
+					return d
+				}
+				if d := ranks[a].length - ranks[b].length; d != 0 {
+					return d
+				}
+			}
+			return items[b].index - items[a].index
+		})
+	}
+	return matches, ctx.Err() == nil
 }
 
 func (m *pickerModel) applyMatches(matches []int, previous int) {
@@ -218,6 +325,9 @@ func (m *pickerModel) key(e pickerEvent) bool {
 		return false
 	}
 	switch e.key {
+	case "ctrl-s":
+		m.cycleSort()
+		return true
 	case "help":
 		m.help, m.helpScroll = true, 0
 	case "up", "ctrl-p":

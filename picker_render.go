@@ -252,11 +252,16 @@ func (m *pickerModel) render(color bool) string {
 		if m.options.multi {
 			title += " · multi"
 		}
-		path := filepath.Base(m.options.path)
-		if width >= 65 {
-			path += " · newest first"
+		if m.options.unique {
+			title += " · unique"
 		}
-		lines[0] = pickerPair(title, path, width)
+		badge, badgeStart := m.sortControl()
+		if width >= 65 {
+			title += " · " + filepath.Base(m.options.path)
+		}
+		left := fitPickerText(title, max(1, badgeStart-2))
+		lines[0] = pickerPair(left, badge, width)
+
 		count := fmt.Sprintf("%d / %d", len(m.matches), len(m.items))
 		if m.searching {
 			count = "searching"
@@ -308,8 +313,11 @@ func (m *pickerModel) render(color bool) string {
 					}
 				}
 				meta := ""
+				if m.options.unique || m.options.sort == pickerFrequency {
+					meta = fmt.Sprintf("  ×%d", item.count)
+				}
 				if width >= 40 {
-					meta = "  " + strconv.Itoa(item.index)
+					meta += "  " + strconv.Itoa(item.index)
 				}
 				if width >= 65 {
 					date := "—"
@@ -349,6 +357,9 @@ func (m *pickerModel) render(color bool) string {
 			preview := m.previewLines()
 			m.previewScroll = min(m.previewScroll, max(0, len(preview)-m.previewRows()))
 			heading := fmt.Sprintf("#%d · %s", item.index, date)
+			if m.options.unique || m.options.sort == pickerFrequency {
+				heading += fmt.Sprintf(" · %d uses", item.count)
+			}
 			if len(preview) > m.previewRows() {
 				heading += fmt.Sprintf(" · %d–%d/%d", m.previewScroll+1, min(len(preview), m.previewScroll+m.previewRows()), len(preview))
 			}
@@ -358,9 +369,9 @@ func (m *pickerModel) render(color bool) string {
 			}
 		}
 		lines[height-2] = strings.Repeat("─", width)
-		footer := "↑↓ move  enter pick  esc cancel  F1 help"
+		footer := "↑↓ move  enter pick  ctrl-s sort  esc cancel  F1 help"
 		if m.options.multi {
-			footer = "↑↓ move  tab mark  enter accept  esc cancel  F1 help"
+			footer = "↑↓ move  tab mark  enter accept  ctrl-s sort  esc cancel  F1 help"
 		}
 		if width < len([]rune(footer)) {
 			footer = "↑↓ move  enter  esc cancel  F1 help"
@@ -396,12 +407,18 @@ var pickerHelp = []string{
 	"Lowercase ignores case; uppercase makes that term case-sensitive.",
 	"Unaccented Latin terms match accents; accented terms stay literal.",
 	"Search covers full multiline commands. Anchors cover the whole command.",
-	"Results and output stay newest-first. Matching never executes a command.", "",
+	"Results default to newest-first; click the sort control or press ctrl-s.",
+	"Sort cycles: newest first, relevance, most used first.",
+	"Equal relevance uses shorter commands, then newer entries.",
+	"Frequency counts uses within the current history selection.",
+	"--unique groups commands; the row represents their latest occurrence.",
+	"Multi-select output stays newest-first regardless of display order.",
+	"Matching never executes a command.", "",
 	"KEYBOARD", "↑↓ / ctrl-p/n   move between results", "page-up/down    move a page",
 	"tab / shift-tab toggle selection and move (multi)", "enter           accept marks, otherwise focused entry",
 	"esc / ctrl-c    cancel without selecting", "left/right      move query cursor", "home/end        query start/end (also ctrl-a/e)",
 	"backspace/del   erase query characters", "ctrl-u          clear query", "ctrl-w          erase previous word",
-	"alt-up/down     scroll preview", "ctrl-z          suspend; shell fg resumes", "F1              toggle this reference", "",
+	"ctrl-s          cycle result sorting", "alt-up/down     scroll preview", "ctrl-z          suspend; shell fg resumes", "F1              toggle this reference", "",
 	"MOUSE", "wheel           scroll results; over preview, scroll preview",
 	"click           focus a row", "click [ ]       toggle mark (multi)", "double-click    accept, like Enter", "",
 	"Marks persist across queries, including hidden entries.",

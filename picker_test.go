@@ -16,7 +16,7 @@ func searchPicker(t *testing.T, m *pickerModel, text string) {
 	m.setQuery(text)
 	m.matches = nil
 	if m.queryErr == nil {
-		matches, _ := filterPicker(context.Background(), m.items, m.query)
+		matches, _ := filterPicker(context.Background(), m.items, m.query, m.options.sort)
 		m.applyMatches(matches, previous)
 	}
 }

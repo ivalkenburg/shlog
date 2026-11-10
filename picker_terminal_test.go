@@ -234,16 +234,18 @@ func TestPickerCancellation(t *testing.T) {
 	}{
 		{"escape", []string{"pick"}, "\x1b", ""},
 		{"ctrl-c", []string{"pick"}, "\x03", ""},
-		{"delete", []string{"del", "--pick"}, "\x1b", "No entries selected.\n"},
-		{"output", []string{"-o", "-s", "del", "--pick"}, "\x03", singleLineHistory},
+		{"delete", []string{"del", "--pick"}, "\x1b", ""},
+		{"output", []string{"-o", "-s", "del", "--pick"}, "\x03", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			hist := writeTempHistory(t, singleLineHistory)
 			p := startPickerPTY(t, append([]string{"--histfile", hist}, tt.args...)...)
 			p.waitText("\x1b[?2004h")
 			p.send(tt.key)
-			if out, err := p.wait(); err != nil || out != tt.want {
-				t.Fatalf("cancelled pick = %q, %v", out, err)
+			out, err := p.wait()
+			assertExitStatus(t, err, exitCanceled)
+			if out != tt.want {
+				t.Fatalf("cancelled pick = %q, want %q", out, tt.want)
 			}
 			assertFileContent(t, hist, singleLineHistory)
 			assertNoBackup(t, hist)
@@ -506,8 +508,10 @@ func TestPickerCancelFromHelpRestoresTerminal(t *testing.T) {
 	p.send("\x1bOP")
 	p.waitText("picker reference")
 	p.send("\x03")
-	if out, err := p.wait(); err != nil || out != "" {
-		t.Fatalf("cancel from help = %q, %v", out, err)
+	out, err := p.wait()
+	assertExitStatus(t, err, exitCanceled)
+	if out != "" {
+		t.Fatalf("cancel from help = %q", out)
 	}
 }
 
@@ -537,5 +541,74 @@ func TestPickerReportsOutputFailure(t *testing.T) {
 	}
 	p.waitText("error writing output")
 	assertFileContent(t, hist, "echo selected\n")
+	assertNoBackup(t, hist)
+}
+
+func TestPickerUniqueAndSortControls(t *testing.T) {
+	hist := writeTempHistory(t, "git checkout\ngit checkout\ngiant careful operation\npwd\n")
+	p := startPickerPTY(t, "pick", "--unique", "--histfile", hist)
+	p.waitText("[ newest first ]")
+	p.waitText("3 / 3")
+	p.send("gco")
+	p.waitText("2 / 3")
+	sorted := p.checkpoint()
+	p.send("\x13")
+	p.waitText("[ relevance ]")
+	p.waitTextAfter("#3 ·", sorted)
+	p.send("\x1b[A\r") // Focus was retained on the newer, weaker match.
+	if out, err := p.wait(); err != nil || out != "git checkout\n" {
+		t.Fatalf("relevance sorting = %q, %v", out, err)
+	}
+	p = startPickerPTY(t, "pick", "--unique", "--histfile", hist)
+	p.waitText("[ newest first ]")
+	after := p.checkpoint()
+	p.send("\x1b[<0;70;1M")
+	p.waitText("[ relevance ]")
+	p.waitTextAfter("#4 ·", after)
+	after = p.checkpoint()
+	p.send("\x1b[<0;70;1M")
+	p.waitText("[ most used first ]")
+	p.waitTextAfter("#4 ·", after)
+	p.send("\x1b[A\r") // Retained pwd focus moves up to the most-used command.
+	if out, err := p.wait(); err != nil || out != "git checkout\n" {
+		t.Fatalf("clickable sorting = %q, %v", out, err)
+	}
+	p = startPickerPTY(t, "pick", "--unique", "--sort=frequency", "--histfile", hist)
+	p.waitText("[ most used first ]")
+	p.send("\r")
+	if out, err := p.wait(); err != nil || out != "git checkout\n" {
+		t.Fatalf("initial frequency sort = %q, %v", out, err)
+	}
+	assertFileContent(t, hist, "git checkout\ngit checkout\ngiant careful operation\npwd\n")
+	assertNoBackup(t, hist)
+}
+
+func TestDeletionFrequencySortKeepsIndividualOccurrences(t *testing.T) {
+	hist := writeTempHistory(t, "git\ngit\npwd\n")
+	p := startPickerPTY(t, "del", "--pick", "--sort", "frequency", "-f", "--histfile", hist)
+	p.waitText("[ most used first ]")
+	p.waitText("3 / 3")
+	p.send("\r")
+	out, err := p.wait()
+	assertExitStatus(t, err, 0)
+	if !strings.Contains(out, "Deleted 1 entries") {
+		t.Fatalf("unexpected deletion: %q", out)
+	}
+	assertFileContent(t, hist, "git\npwd\n")
+	assertFileContent(t, hist+".bak", "git\ngit\npwd\n")
+}
+
+func TestPickerSIGINTCancellationStatus(t *testing.T) {
+	hist := writeTempHistory(t, "git\n")
+	p := startPickerPTY(t, "pick", "--histfile", hist)
+	p.waitText("[ newest first ]")
+	if err := p.cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	out, err := p.wait()
+	assertExitStatus(t, err, exitCanceled)
+	if out != "" {
+		t.Fatalf("cancel produced output: %q", out)
+	}
 	assertNoBackup(t, hist)
 }

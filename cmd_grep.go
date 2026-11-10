@@ -9,14 +9,14 @@ import (
 func runGrep(args []string, histFile string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "error: grep requires a pattern argument")
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 
 	pattern := args[0]
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid pattern %q: %v\n", pattern, err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 
 	entries := loadHistory(histFile)
@@ -25,14 +25,14 @@ func runGrep(args []string, histFile string) {
 	pool, err := selectOptionalEntries(entries, args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 
 	matched := MatchEntriesRe(pool, re)
 
 	if len(matched) == 0 {
 		fmt.Fprintf(os.Stderr, "No entries matched. Total entries: %d.\n", len(entries))
-		return
+		os.Exit(exitNoMatch)
 	}
 
 	printIndexed(entries, matched, re)

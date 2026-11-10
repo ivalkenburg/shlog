@@ -100,7 +100,7 @@ func TestSearchLongCommand(t *testing.T) {
 func TestFilterCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, ok := filterPicker(ctx, []pickerItem{{text: newSearchText("echo")}}, searchQuery{}); ok {
+	if _, ok := filterPicker(ctx, []pickerItem{{text: newSearchText("echo")}}, searchQuery{}, pickerNewest); ok {
 		t.Fatal("cancelled search completed")
 	}
 }
@@ -129,7 +129,7 @@ func BenchmarkPickerSearch100K(b *testing.B) {
 			q, _ := parseSearch(query)
 			b.ReportAllocs()
 			for b.Loop() {
-				filterPicker(context.Background(), items, q)
+				filterPicker(context.Background(), items, q, pickerNewest)
 			}
 		})
 	}
@@ -146,7 +146,7 @@ func BenchmarkPickerUpdate100K(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		m.setQuery("gco")
-		matches, _ := filterPicker(context.Background(), m.items, m.query)
+		matches, _ := filterPicker(context.Background(), m.items, m.query, m.options.sort)
 		m.applyMatches(matches, -1)
 		m.render(true)
 	}
@@ -185,7 +185,7 @@ func BenchmarkPickerCancelledSearch100K(b *testing.B) {
 	cancel()
 	b.ReportAllocs()
 	for b.Loop() {
-		filterPicker(ctx, items, searchQuery{})
+		filterPicker(ctx, items, searchQuery{}, pickerNewest)
 	}
 }
 
@@ -212,4 +212,56 @@ func FuzzExtendedSearch(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestRelevanceScoreMatchesHighlightAlignment(t *testing.T) {
+	var work searchWorkspace
+	for _, query := range []string{"gco", "git | hg", "'git", "git$", "^git", "'git'", "^git$", "cafe", "é", "你好", "!sudo", "git main | dev", "^$", strings.Repeat("x", 100) + "gco"} {
+		q, err := parseSearch(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, text := range []string{"git checkout", "echo git", "git", "hg status", "main; git status", "git dev", "café", "cafe\u0301", "echo 你好", "", strings.Repeat("x", 30_000) + "git checkout"} {
+			s := newSearchText(text)
+			for _, group := range q.groups {
+				for _, term := range group {
+					if term.negative || !term.matches(s) {
+						continue
+					}
+					_, want := term.positions(s)
+					positions, got, ok := work.align(context.Background(), term, s, false)
+					if !ok || positions != nil || got != want {
+						t.Fatalf("query %q score on %q = %d, want %d", query, commandPreview(text[:min(len(text), 50)]), got, want)
+					}
+				}
+			}
+		}
+	}
+}
+
+type cancelScoringContext struct {
+	context.Context
+	cancel context.CancelFunc
+	checks int
+}
+
+func (c *cancelScoringContext) Err() error {
+	c.checks++
+	if c.checks == 20 {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestRelevanceCancellationDuringAlignment(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &cancelScoringContext{Context: parent, cancel: cancel}
+	text := strings.Repeat("x", 30_000) + "git checkout"
+	q, _ := parseSearch(strings.Repeat("x", 55) + "gco")
+	items := []pickerItem{{text: newSearchText(text)}}
+	matches, ok := filterPicker(ctx, items, q, pickerRelevance)
+	if ok || matches != nil || ctx.checks < 20 {
+		t.Fatalf("in-progress scoring ignored cancellation: ok=%t checks=%d", ok, ctx.checks)
+	}
 }

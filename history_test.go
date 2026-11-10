@@ -2277,3 +2277,99 @@ func TestDeduplicateEntries_ZshTimestampedAndPlain(t *testing.T) {
 		t.Errorf("keep %v, removed %v", timestampsOf(keep), timestampsOf(removed))
 	}
 }
+
+func TestZshContinuationBeforeHistoryHeader(t *testing.T) {
+	original := ": 1000:0;echo first\\\n: 1234:0;echo second\\\necho third\n: 1001:0;pwd\n"
+	entries := parseHistoryData([]byte(original))
+	if len(entries) != 2 || entries[0].Timestamp != 1000 || CommandText(entries[0]) != "echo first\n: 1234:0;echo second\necho third" {
+		t.Fatalf("continued header split entry: %+v", entries)
+	}
+	var written strings.Builder
+	if err := writeEntries(&written, entries); err != nil {
+		t.Fatal(err)
+	}
+	if written.String() != original {
+		t.Fatalf("raw history changed: %q", written.String())
+	}
+}
+
+func TestBashPlainBlankSeparatorsRoundTrip(t *testing.T) {
+	original := "echo first\\\n\npwd\n\n\nls\n\n"
+	entries := parseHistoryData([]byte(original))
+	if len(entries) != 3 {
+		t.Fatalf("entry count = %d, want 3", len(entries))
+	}
+	want := []string{"echo first\\", "pwd", "ls"}
+	for i, entry := range entries {
+		if got := CommandText(entry); got != want[i] {
+			t.Fatalf("command %d = %q, want %q", i, got, want[i])
+		}
+	}
+	var out strings.Builder
+	if err := writeEntries(&out, entries); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != original {
+		t.Fatalf("separators changed on write: %q", out.String())
+	}
+	keep, removed := DeduplicateEntries(parseHistoryData([]byte("pwd\n\npwd\n")), false)
+	if len(keep) != 1 || len(removed) != 1 {
+		t.Fatal("blank separators changed duplicate matching")
+	}
+}
+
+func TestDateSelectionsAcrossDST(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := time.Local
+	time.Local = loc
+	t.Cleanup(func() { time.Local = previous })
+	for _, selection := range []string{"2024-03-10T02", "2024-03-10T02:30", "2024-03-10T02:30:00", "2024-03-10T02..2024-03-10T03", "2024-01-01T01:02:03.5"} {
+		if _, err := SelectEntries(makeEntries(1704067200), selection); err == nil {
+			t.Errorf("accepted invalid/nonexistent time %q", selection)
+		}
+	}
+	var all []*Entry
+	for _, stamp := range []string{"2024-11-03T01:30:00-04:00", "2024-11-03T01:30:00-05:00", "2024-11-03T01:31:00-05:00", "2024-11-03T02:30:00-05:00"} {
+		instant, err := time.Parse(time.RFC3339, stamp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, entryWithCmd(instant.Unix(), stamp))
+	}
+	for _, tt := range []struct {
+		selection string
+		want      []*Entry
+	}{
+		{"2024-11-03T01", all[:3]},
+		{"2024-11-03T01:30", all[:2]},
+		{"2024-11-03T01:30:00", all[:2]},
+		{"2024-11-03T01:30..2024-11-03T01:30", all[:2]},
+		{"2024-11-03T01:31..2024-11-03T02:30", all[2:]},
+		{"2024-11-03", all},
+		{"1h", all[:2]},
+	} {
+		got, err := SelectEntries(all, tt.selection)
+		if err != nil || !slices.Equal(got, tt.want) {
+			t.Errorf("%s = %v, %v; want %v", tt.selection, timestampsOf(got), err, timestampsOf(tt.want))
+		}
+	}
+}
+
+func TestDateWithSkippedLocalMidnight(t *testing.T) {
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := time.Local
+	time.Local = loc
+	t.Cleanup(func() { time.Local = previous })
+	instant := time.Date(2018, 11, 4, 12, 0, 0, 0, loc)
+	entries := makeEntries(instant.Unix())
+	got, err := SelectEntries(entries, "2018-11-04")
+	if err != nil || !slices.Equal(got, entries) {
+		t.Fatalf("date with skipped midnight = %v, %v", got, err)
+	}
+}

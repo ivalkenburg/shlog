@@ -2,18 +2,38 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 func runPick(args []string, histFile string) {
-	multi := false
+	options := pickerOptions{path: histFile}
 	var selArgs []string
-	for _, a := range args {
-		if a == "--multi" {
-			multi = true
-		} else {
+	literal := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if literal {
+			selArgs = append(selArgs, a)
+			continue
+		}
+		switch {
+		case a == "--":
+			literal = true
+		case a == "--multi":
+			options.multi = true
+		case a == "--unique":
+			options.unique = true
+		case a == "--sort" || strings.HasPrefix(a, "--sort="):
+			value, err := pickerSortArgument(args, &i)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(exitError)
+			}
+			options.sort = value
+		default:
 			selArgs = append(selArgs, a)
 		}
 	}
@@ -23,13 +43,20 @@ func runPick(args []string, histFile string) {
 	pool, err := selectOptionalEntries(entries, selArgs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 
-	selected, err := pickEntries(entries, pool, pickerOptions{multi: multi, path: histFile})
+	selected, err := pickEntries(entries, pool, options)
+	if errors.Is(err, errPickerCanceled) {
+		os.Exit(exitCanceled)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitError)
+	}
+	if len(selected) == 0 {
+		fmt.Fprintln(os.Stderr, "No entries matched.")
+		os.Exit(exitNoMatch)
 	}
 
 	w := bufio.NewWriter(os.Stdout)
@@ -39,7 +66,7 @@ func runPick(args []string, histFile string) {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error writing output: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 }
 

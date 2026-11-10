@@ -33,6 +33,11 @@ func readTerminalState(fd int) (*terminalState, error) {
 	return &state, err
 }
 
+func isTerminal(fd int) bool {
+	_, err := readTerminalState(fd)
+	return err == nil
+}
+
 func makeTerminalRaw(fd int, state *terminalState) error {
 	raw := *state
 	raw.Iflag &^= syscall.IGNBRK | syscall.BRKINT | syscall.PARMRK | syscall.ISTRIP | syscall.INLCR | syscall.IGNCR | syscall.ICRNL | syscall.IXON
@@ -89,7 +94,15 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 		_, writeErr := io.WriteString(tty, pickerLeaveTerminal)
 		return errors.Join(writeErr, restoreTerminal(fd, state))
 	}
-	defer func() { err = errors.Join(err, leave()) }()
+	defer func() {
+		if cleanupErr := leave(); cleanupErr != nil {
+			if errors.Is(err, errPickerCanceled) {
+				err = cleanupErr
+			} else {
+				err = errors.Join(err, cleanupErr)
+			}
+		}
+	}()
 	enter := func() error {
 		if err := makeTerminalRaw(fd, state); err != nil {
 			return err
@@ -156,6 +169,10 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 		cancelSearch()
 		generation++
 		previous := m.focused()
+		if m.searching {
+			previous = m.searchFocus
+		}
+		m.searchFocus = previous
 		m.setQuery(string(m.input))
 		m.matches, m.focus, m.offset, m.previewScroll = nil, 0, 0, 0
 		m.searching = m.queryErr == nil
@@ -164,9 +181,9 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 		}
 		searchCtx, cancel := context.WithCancel(ctx)
 		cancelSearch = cancel
-		q, id := m.query, generation
+		q, id, order := m.query, generation, m.options.sort
 		go func() {
-			if matches, ok := filterPicker(searchCtx, m.items, q); ok {
+			if matches, ok := filterPicker(searchCtx, m.items, q, order); ok {
 				select {
 				case results <- pickerSearchResult{id, matches, previous}:
 				case <-searchCtx.Done():
@@ -204,10 +221,10 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 			}
 			switch e.key {
 			case "cancel":
-				return nil, nil
+				return nil, errPickerCanceled
 			case "escape":
 				if !m.help {
-					return nil, nil
+					return nil, errPickerCanceled
 				}
 			case "suspend":
 				if err := suspend(); err != nil {
@@ -220,7 +237,10 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 					}
 				}
 			case "mouse":
-				if m.mouse(e, time.Now()) {
+				if m.clickedSort(e) {
+					m.cycleSort()
+					startSearch()
+				} else if m.mouse(e, time.Now()) {
 					if entries, accepted := m.accept(); accepted {
 						return entries, nil
 					}
@@ -252,7 +272,7 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 					return nil, err
 				}
 			case syscall.SIGINT:
-				return nil, nil
+				return nil, errPickerCanceled
 			default:
 				return nil, fmt.Errorf("picker interrupted by %s", sig)
 			}

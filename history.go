@@ -117,7 +117,9 @@ func parseZshLines(lines []string) []*Entry {
 	var current *Entry
 
 	for _, line := range lines {
-		if m := entryHeaderRe.FindStringSubmatch(line); m != nil {
+		if current != nil && strings.HasSuffix(current.Raw[len(current.Raw)-1], `\`) {
+			current.Raw = append(current.Raw, line)
+		} else if m := entryHeaderRe.FindStringSubmatch(line); m != nil {
 			ts, _ := strconv.ParseInt(m[1], 10, 64)
 			elapsed, _ := strconv.ParseInt(m[2], 10, 64)
 			current = &Entry{
@@ -127,7 +129,7 @@ func parseZshLines(lines []string) []*Entry {
 				zsh:       true,
 			}
 			entries = append(entries, current)
-		} else if current != nil && (line == "" || strings.HasSuffix(current.Raw[len(current.Raw)-1], `\`)) {
+		} else if current != nil && line == "" {
 			current.Raw = append(current.Raw, line)
 		} else if line != "" {
 			current = &Entry{Raw: []string{line}, zsh: true}
@@ -223,9 +225,9 @@ func parseFishLines(lines []string) []*Entry {
 // parseBashPlainLines parses a plain bash history file (no HISTTIMEFORMAT).
 // Each non-empty line is treated as a single entry with no timestamp.
 //
-// When both cmdhist and lithist are set, bash stores multi-line commands with
-// backslash-newline continuation: all lines except the last end with '\'.
-// We detect this and group consecutive continuation lines into a single entry.
+// Backslash-newline continuations are grouped into one entry. Plain history
+// does not otherwise identify multiline boundaries; lithist can also store
+// literal newlines without continuation markers, which cannot be grouped here.
 //
 // Note: a command that genuinely ends with '\' (e.g. a sed expression) is
 // indistinguishable from a continuation marker — this is an inherent ambiguity
@@ -236,7 +238,12 @@ func parseBashPlainLines(lines []string) []*Entry {
 
 	for _, line := range lines {
 		if line == "" {
-			// Blank lines are not part of any command; reset continuation state.
+			// Keep separators on disk: dropping one after a trailing backslash
+			// would merge surviving commands when the file is read again.
+			if len(entries) > 0 {
+				last := entries[len(entries)-1]
+				last.Raw = append(last.Raw, line)
+			}
 			current = nil
 			continue
 		}
@@ -424,8 +431,13 @@ func CommandText(e *Entry) string {
 		return fishUnescaper.Replace(cmd)
 	}
 
-	// bash plain: the line itself is the command
-	return strings.Join(e.Raw, "\n")
+	// Plain-history blank separators belong to Raw for round-tripping, but
+	// are not part of the command used for matching and deduplication.
+	lines := e.Raw
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // MatchEntries returns entries whose command text matches the given regex pattern.
@@ -572,7 +584,7 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 		if !hasTimestamps(entries) {
 			return nil, fmt.Errorf(errNoTimestamps, selection)
 		}
-		return entriesBetween(entries, from, to), nil
+		return entriesBetweenDates(entries, from, to), nil
 	}
 
 	negative := strings.HasPrefix(selection, "-")
@@ -601,12 +613,14 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 	if err != nil {
 		// Try single date/datetime (only without leading "-")
 		if !negative {
-			if pd, perr := parseDateTime(selection); perr == nil {
-				if !hasTimestamps(entries) {
-					return nil, fmt.Errorf(errNoTimestamps, selection)
-				}
-				return entriesBetween(entries, pd.t, pd.end()), nil
+			pd, dateErr := parseDateTime(selection)
+			if dateErr != nil {
+				return nil, fmt.Errorf("invalid selection %q: %w", selection, dateErr)
 			}
+			if !hasTimestamps(entries) {
+				return nil, fmt.Errorf(errNoTimestamps, selection)
+			}
+			return entriesBetweenDates(entries, pd.t, pd.end()), nil
 		}
 		return nil, fmt.Errorf("invalid selection %q: not a valid integer, duration, date, or date range (%v)", selection, err)
 	}
@@ -652,17 +666,33 @@ func entriesBetween(entries []*Entry, from, to time.Time) []*Entry {
 	return result
 }
 
-// parsedDate holds a parsed date/datetime and the granularity of the smallest
-// unit present (second, minute, hour, or day).
+// Date selections compare local civil fields so repeated DST hours include
+// both occurrences. Durations continue to use elapsed time in entriesBetween.
+func entriesBetweenDates(entries []*Entry, from, to time.Time) []*Entry {
+	var result []*Entry
+	for _, e := range entries {
+		if e.Timestamp == 0 {
+			continue
+		}
+		local := e.Time().In(time.Local)
+		year, month, day := local.Date()
+		hour, minute, second := local.Clock()
+		civil := time.Date(year, month, day, hour, minute, second, 0, time.UTC)
+		if !civil.Before(from) && !civil.After(to) {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// parsedDate stores civil date/time fields in UTC for comparison, independent
+// of DST offsets, and the granularity of the smallest unit present.
 type parsedDate struct {
 	t    time.Time
-	gran time.Duration // unit size; a day uses calendar arithmetic in end()
+	gran time.Duration
 }
 
 func (d parsedDate) end() time.Time {
-	if d.gran == 24*time.Hour {
-		return d.t.AddDate(0, 0, 1).Add(-time.Nanosecond)
-	}
 	return d.t.Add(d.gran - time.Nanosecond)
 }
 
@@ -676,18 +706,27 @@ var dateFormats = []struct {
 	{"2006-01-02", 24 * time.Hour},
 }
 
-// parseDateTime parses a date or datetime string in local time.
+// parseDateTime validates local civil dates and times without silently shifting
+// nonexistent times during DST. Dates can span a skipped local midnight.
 // Supported formats: YYYY-MM-DD, YYYY-MM-DDTHH, YYYY-MM-DDTHH:MM, YYYY-MM-DDTHH:MM:SS.
 func parseDateTime(s string) (parsedDate, error) {
 	for _, f := range dateFormats {
-		if t, err := time.ParseInLocation(f.layout, s, time.Local); err == nil {
-			return parsedDate{t, f.gran}, nil
+		t, err := time.Parse(f.layout, s)
+		if err != nil || t.Format(f.layout) != s {
+			continue
 		}
+		if f.gran < 24*time.Hour {
+			local, err := time.ParseInLocation(f.layout, s, time.Local)
+			if err != nil || local.Format(f.layout) != s {
+				return parsedDate{}, fmt.Errorf("local time %q does not exist in %s", s, time.Local)
+			}
+		}
+		return parsedDate{t, f.gran}, nil
 	}
 	return parsedDate{}, fmt.Errorf("unrecognized date format %q (expected YYYY-MM-DD, YYYY-MM-DDTHH, YYYY-MM-DDTHH:MM, or YYYY-MM-DDTHH:MM:SS)", s)
 }
 
-// parseDateRange parses a "from..to" date range. The to-value is made inclusive
+// parseDateRange parses a "from..to" civil date range. The to-value is made inclusive
 // by advancing it to the end of its granularity unit.
 func parseDateRange(fromStr, toStr string) (time.Time, time.Time, error) {
 	from, err := parseDateTime(fromStr)

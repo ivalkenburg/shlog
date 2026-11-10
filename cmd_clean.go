@@ -11,8 +11,11 @@ func runClean(args []string, force, simulate, output bool, histFile string) {
 	// parse clean-specific flags
 	keepOldest := false
 	var selArgs []string
+	literal := false
 	for _, a := range args {
-		if a == "--keep-oldest" {
+		if !literal && a == "--" {
+			literal = true
+		} else if !literal && a == "--keep-oldest" {
 			keepOldest = true
 		} else {
 			selArgs = append(selArgs, a)
@@ -24,7 +27,7 @@ func runClean(args []string, force, simulate, output bool, histFile string) {
 	scope, err := selectOptionalEntries(entries, selArgs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 
 	remaining, removed := DeduplicateEntries(scope, keepOldest)
@@ -38,20 +41,20 @@ func runClean(args []string, force, simulate, output bool, histFile string) {
 	}
 
 	if len(removed) == 0 {
-		fmt.Printf("No duplicates found. Total entries: %d.\n", len(entries))
+		printOutput("No duplicates found. Total entries: %d.\n", len(entries))
 		return
 	}
 
 	if simulate {
 		printEntries(removed)
-		fmt.Printf("\n(simulate) Would remove %d duplicate entries of %d total.\n", len(removed), len(entries))
+		printOutput("\n(simulate) Would remove %d duplicate entries of %d total.\n", len(removed), len(entries))
 		return
 	}
 
 	if !confirm(force, fmt.Sprintf("About to remove %d duplicate entries of %d total. Confirm? [y/N] ", len(removed), len(entries))) {
-		return
+		os.Exit(exitCanceled)
 	}
 
 	writeHistory(histFile, original, remaining)
-	fmt.Printf("Removed %d duplicate entries. %d entries remaining.\n", len(removed), len(remaining))
+	printOutput("Removed %d duplicate entries. %d entries remaining.\n", len(removed), len(remaining))
 }

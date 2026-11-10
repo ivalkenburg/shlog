@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,7 +30,19 @@ func runTests(m *testing.M) int {
 	defer os.RemoveAll(tmp)
 
 	binaryPath = filepath.Join(tmp, "shlog")
-	if out, err := exec.Command("go", "build", "-o", binaryPath, ".").CombinedOutput(); err != nil {
+	buildArgs := []string{"build", "-o", binaryPath}
+	if raceEnabled {
+		buildArgs = append(buildArgs, "-race")
+		// Instrument the actual CLI used by integration/PTY tests without a
+		// one-second race-runtime sleep for every subprocess. Keep user options.
+		original := os.Getenv("GORACE")
+		if err := os.Setenv("GORACE", strings.TrimSpace(original+" atexit_sleep_ms=0")); err != nil {
+			panic(err)
+		}
+		defer os.Setenv("GORACE", original)
+	}
+	buildArgs = append(buildArgs, ".")
+	if out, err := exec.Command("go", buildArgs...).CombinedOutput(); err != nil {
 		panic("failed to build binary: " + string(out))
 	}
 
@@ -598,9 +611,11 @@ func TestConfirmation(t *testing.T) {
 				cmd := exec.Command(binaryPath, args...)
 				cmd.Stdin = strings.NewReader(answer)
 				out, err := cmd.CombinedOutput()
-				if err != nil {
-					t.Fatalf("confirmation: %v\n%s", err, out)
+				wantStatus := exitCanceled
+				if answer == " YES \n" {
+					wantStatus = 0
 				}
+				assertExitStatus(t, err, wantStatus)
 				if !strings.Contains(string(out), "[y/N]") {
 					t.Fatalf("confirmation prompt missing: %s", out)
 				}
@@ -711,9 +726,12 @@ func TestDelMatchAndInvert(t *testing.T) {
 			if tt.invert {
 				args = append(args, "--invert")
 			}
-			if out, err := runGoshist(t, args...); err != nil {
-				t.Fatalf("del match: %v\n%s", err, out)
+			_, err := runGoshist(t, args...)
+			wantStatus := 0
+			if tt.want == original {
+				wantStatus = exitNoMatch
 			}
+			assertExitStatus(t, err, wantStatus)
 			assertFileContent(t, hist, tt.want)
 			if tt.want == original {
 				assertNoBackup(t, hist)
@@ -792,4 +810,214 @@ func TestZshEntriesWithoutTimestampsArePreserved(t *testing.T) {
 	}
 	assertFileContent(t, hist, "old plain\n: 1000:0;timed\n")
 	assertFileContent(t, hist+".bak", original)
+}
+
+func assertExitStatus(t *testing.T, err error, want int) {
+	t.Helper()
+	got := 0
+	if err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			t.Fatalf("process did not exit normally: %v", err)
+		}
+		got = exit.ExitCode()
+	}
+	if got != want {
+		t.Fatalf("exit status = %d, want %d (error: %v)", got, want, err)
+	}
+}
+
+func TestExitStatuses(t *testing.T) {
+	for _, tt := range []struct {
+		name, history string
+		args          []string
+		want          int
+	}{
+		{"matched", "git\n", []string{"grep", "git"}, 0},
+		{"no matches", "git\n", []string{"grep", "absent"}, exitNoMatch},
+		{"empty list", "", []string{"list"}, exitNoMatch},
+		{"empty stats", "", []string{"stats"}, exitNoMatch},
+		{"empty pick", "", []string{"pick"}, exitNoMatch},
+		{"empty delete picker", "", []string{"del", "--pick"}, exitNoMatch},
+		{"no deletion match", "git\n", []string{"del", "--match", "absent"}, exitNoMatch},
+		{"unchanged output", "git\n", []string{"del", "--match", "absent", "-o"}, 0},
+		{"no duplicates", "git\n", []string{"clean"}, 0},
+		{"empty cleanup", "", []string{"clean"}, 0},
+		{"bad regex", "git\n", []string{"grep", "["}, exitError},
+		{"bad selection", "git\n", []string{"list", "invalid"}, exitError},
+		{"bad command", "git\n", []string{"not-a-command"}, exitError},
+		{"bad terminal", "git\n", []string{"pick"}, exitError},
+		{"bad sort", "git\n", []string{"pick", "--sort", "bogus"}, exitError},
+		{"missing sort", "git\n", []string{"pick", "--sort"}, exitError},
+		{"sort without picker", "git\n", []string{"del", "--sort", "newest", "-1"}, exitError},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TERM", "dumb")
+			hist := writeTempHistory(t, tt.history)
+			out, err := runGoshist(t, append([]string{"--histfile", hist}, tt.args...)...)
+			assertExitStatus(t, err, tt.want)
+			if tt.want == exitNoMatch && !strings.Contains(out, "No entries matched") {
+				t.Fatalf("missing no-match diagnostic: %q", out)
+			}
+			assertFileContent(t, hist, tt.history)
+			assertNoBackup(t, hist)
+		})
+	}
+	_, err := runGoshist(t, "list", "--histfile", filepath.Join(t.TempDir(), "missing"))
+	assertExitStatus(t, err, exitError)
+}
+
+func TestGlobalFlagsAfterCommand(t *testing.T) {
+	for _, args := range [][]string{
+		{"clean", "--dry-run"}, {"del", "-1", "--dry-run"},
+		{"del", "--dry-run", "--match", "git"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			hist := writeTempHistory(t, "git\npwd\ngit\n")
+			out, err := runGoshist(t, append(args, "--histfile", hist)...)
+			assertExitStatus(t, err, 0)
+			if !strings.Contains(out, "(simulate)") {
+				t.Fatalf("missing dry-run output: %q", out)
+			}
+			assertFileContent(t, hist, "git\npwd\ngit\n")
+			assertNoBackup(t, hist)
+		})
+	}
+	hist := writeTempHistory(t, "--help\n-f\n--histfile\n")
+	for _, pattern := range []string{"--help", "-f", "--histfile"} {
+		out, err := runGoshist(t, "grep", "--histfile", hist, "--", pattern)
+		assertExitStatus(t, err, 0)
+		if !strings.Contains(out, pattern) || strings.Contains(out, "Usage:") {
+			t.Fatalf("literal grep pattern = %q", out)
+		}
+		out, err = runGoshist(t, "del", "--histfile", hist, "--match", pattern, "--dry-run")
+		assertExitStatus(t, err, 0)
+		if !strings.Contains(out, "(simulate)") {
+			t.Fatalf("literal match pattern = %q", out)
+		}
+		assertNoBackup(t, hist)
+	}
+	out, err := runGoshist(t, "del", "-1", "--histfile", hist, "-f")
+	assertExitStatus(t, err, 0)
+	if !strings.Contains(out, "Deleted 1") {
+		t.Fatalf("trailing force flag = %q", out)
+	}
+	assertFileContent(t, hist, "--help\n-f\n")
+}
+
+func TestCommandOutputFailures(t *testing.T) {
+	for _, args := range [][]string{
+		{"stats"}, {"help"}, {"--help"}, {"version"},
+		{"completion", "zsh"}, {"completion", "bash"}, {"completion", "fish"},
+		{"clean"}, {"del", "-1"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			hist := writeTempHistory(t, "git\npwd\n")
+			readOnly, err := os.Open(hist)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer readOnly.Close()
+			cmd := exec.Command(binaryPath, append([]string{"--histfile", hist}, args...)...)
+			cmd.Stdout = readOnly
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			assertExitStatus(t, cmd.Run(), exitError)
+			if !strings.Contains(stderr.String(), "error writing output") {
+				t.Fatalf("missing output error: %q", stderr.String())
+			}
+			assertFileContent(t, hist, "git\npwd\n")
+			assertNoBackup(t, hist)
+		})
+	}
+}
+
+func TestConfirmationReadFailure(t *testing.T) {
+	hist := writeTempHistory(t, "git\npwd\ngit\n")
+	directory, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	cmd := exec.Command(binaryPath, "del", "-1", "--histfile", hist)
+	cmd.Stdin = directory
+	out, err := cmd.CombinedOutput()
+	assertExitStatus(t, err, exitError)
+	if !strings.Contains(string(out), "error reading confirmation") {
+		t.Fatalf("missing input diagnostic: %q", out)
+	}
+	assertFileContent(t, hist, "git\npwd\ngit\n")
+	assertNoBackup(t, hist)
+}
+
+func TestDeleteZshContinuationContainingHeader(t *testing.T) {
+	original := ": 1000:0;echo first\\\n: 1234:0;echo second\\\necho third\n: 1001:0;pwd\n"
+	hist := writeTempHistory(t, original)
+	_, err := runGoshist(t, "del", "1", "-f", "--histfile", hist)
+	assertExitStatus(t, err, 0)
+	assertFileContent(t, hist, ": 1001:0;pwd\n")
+	assertFileContent(t, hist+".bak", original)
+}
+
+func TestDeletePreservesBashPlainCommandBoundaries(t *testing.T) {
+	original := "echo first\\\n\npwd\nls\n"
+	hist := writeTempHistory(t, original)
+	_, err := runGoshist(t, "del", "-1", "-f", "--histfile", hist)
+	assertExitStatus(t, err, 0)
+	assertFileContent(t, hist, "echo first\\\n\npwd\n")
+	assertFileContent(t, hist+".bak", original)
+	entries, err := ParseHistoryFile(hist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || CommandText(entries[0]) != "echo first\\" || CommandText(entries[1]) != "pwd" {
+		t.Fatalf("surviving commands merged after delete: %+v", entries)
+	}
+}
+
+func TestInvalidLocalDateDeletionNeverWrites(t *testing.T) {
+	t.Setenv("TZ", "America/New_York")
+	original := ": 1710052200:0;first\n: 1710055800:0;second\n"
+	for _, selection := range []string{"2024-03-10T02", "2024-03-10T02:30", "2024-03-10T02:30:00", "2024-03-10T02..2024-03-10T03", "2024-01-01T01:02:03.5"} {
+		hist := writeTempHistory(t, original)
+		out, err := runGoshist(t, "del", selection, "-f", "--histfile", hist)
+		assertExitStatus(t, err, exitError)
+		if !strings.Contains(out, "error:") {
+			t.Fatalf("missing date error: %q", out)
+		}
+		assertFileContent(t, hist, original)
+		assertNoBackup(t, hist)
+	}
+}
+
+func TestHumanPreviewsEscapeTerminalControls(t *testing.T) {
+	command := "echo \x1b[2J\x1b]52;c;data\a\r\u202efake"
+	hist := writeTempHistory(t, command+"\n")
+	for _, args := range [][]string{{"list"}, {"grep", "echo"}, {"stats"}} {
+		out, err := runGoshist(t, append(args, "--histfile", hist)...)
+		assertExitStatus(t, err, 0)
+		if strings.ContainsAny(out, "\x1b\a\r\u202e") {
+			t.Fatalf("terminal controls leaked from %q: %q", args, out)
+		}
+		if !strings.Contains(out, "^[[2J") || !strings.Contains(out, "<202E>") {
+			t.Fatalf("escaped preview missing: %q", out)
+		}
+	}
+	out, err := runGoshist(t, "del", "--match", "never matches", "-o", "--histfile", hist)
+	assertExitStatus(t, err, 0)
+	if out != command+"\n" {
+		t.Fatal("raw history output was sanitized")
+	}
+	var picked bytes.Buffer
+	entries, err := ParseHistoryFile(hist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCommands(&picked, entries); err != nil {
+		t.Fatal(err)
+	}
+	if picked.String() != command+"\n" {
+		t.Fatal("selected command output was sanitized")
+	}
+	assertNoBackup(t, hist)
 }

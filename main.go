@@ -9,47 +9,28 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var version = "dev"
 
 func main() {
-	args := os.Args[1:]
-
-	force := false
-	simulate := false
-	output := false
-	histFile := defaultHistoryFilePath()
-
-	// consume option flags
-	for len(args) > 0 {
-		switch args[0] {
-		case "-f":
-			force = true
-		case "-s", "--dry-run":
-			simulate = true
-		case "-o":
-			output = true
-		case "-h", "--help":
-			fmt.Println(usage)
-			return
-		case "--histfile":
-			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "error: --histfile requires a path argument")
-				os.Exit(1)
-			}
-			histFile = args[1]
-			args = args[1:]
-		default:
-			goto doneFlags
-		}
-		args = args[1:]
+	opts, err := parseCLI(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(exitError)
 	}
-doneFlags:
+	if opts.help {
+		printOutput("%s\n", usage)
+		return
+	}
+	args := opts.args
+	force, simulate, output, histFile := opts.force, opts.simulate, opts.output, opts.histFile
 
 	if len(args) == 0 {
 		printUsage()
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 
 	switch args[0] {
@@ -66,7 +47,7 @@ doneFlags:
 	case "undo":
 		if len(args) != 1 {
 			fmt.Fprintln(os.Stderr, "error: undo does not accept arguments")
-			os.Exit(1)
+			os.Exit(exitError)
 		}
 		runUndo(force, simulate, output, histFile)
 	case "pick":
@@ -76,19 +57,19 @@ doneFlags:
 	case "help":
 		if len(args) != 1 {
 			fmt.Fprintln(os.Stderr, "error: help does not accept arguments")
-			os.Exit(1)
+			os.Exit(exitError)
 		}
-		fmt.Println(usage)
+		printOutput("%s\n", usage)
 	case "version":
 		if len(args) != 1 {
 			fmt.Fprintln(os.Stderr, "error: version does not accept arguments")
-			os.Exit(1)
+			os.Exit(exitError)
 		}
-		fmt.Println(version)
+		printOutput("%s\n", version)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n\n", args[0])
 		printUsage()
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 }
 
@@ -101,7 +82,7 @@ func loadHistorySnapshot(histFile string) ([]*Entry, []byte) {
 	data, err := os.ReadFile(histFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading history file %s: %v\n", histFile, err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 	return parseHistoryData(data), data
 }
@@ -109,7 +90,7 @@ func loadHistorySnapshot(histFile string) ([]*Entry, []byte) {
 func writeHistory(histFile string, original []byte, entries []*Entry) {
 	if err := ReplaceHistoryFile(histFile, original, entries); err != nil {
 		fmt.Fprintf(os.Stderr, "error updating history file: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 }
 
@@ -117,15 +98,26 @@ func confirm(force bool, prompt string) bool {
 	if force {
 		return true
 	}
-	fmt.Print(prompt)
+	printOutput("%s", prompt)
 	reader := bufio.NewReader(os.Stdin)
-	answer, _ := reader.ReadString('\n')
+	answer, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		fmt.Fprintf(os.Stderr, "error reading confirmation: %v\n", err)
+		os.Exit(exitError)
+	}
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer != "y" && answer != "yes" {
-		fmt.Println("Aborted.")
+		printOutput("Aborted.\n")
 		return false
 	}
 	return true
+}
+
+func printOutput(format string, args ...any) {
+	if _, err := fmt.Fprintf(os.Stdout, format, args...); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing output: %v\n", err)
+		os.Exit(exitError)
+	}
 }
 
 func printEntries(entries []*Entry) {
@@ -136,7 +128,7 @@ func printEntries(entries []*Entry) {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error writing output: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 }
 
@@ -160,7 +152,7 @@ func printIndexed(all, toShow []*Entry, highlight *regexp.Regexp) {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error writing output: %v\n", err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 }
 
@@ -193,10 +185,20 @@ func writeIndexed(w io.Writer, all, toShow []*Entry, highlight *regexp.Regexp, c
 }
 
 func commandPreview(cmd string) string {
-	if first, _, multiline := strings.Cut(cmd, "\n"); multiline {
-		return first + " ↵"
+	first, _, multiline := strings.Cut(cmd, "\n")
+	// Human-facing previews share the picker's control/bidi escaping. Raw
+	// history and selected-command output are written through separate paths.
+	preview := first
+	if strings.IndexFunc(first, func(r rune) bool {
+		return unicode.IsControl(r) || isBidiControl(r) || r == utf8.RuneError
+	}) >= 0 {
+		glyphs := pickerGlyphs(first, nil)
+		preview = renderPickerGlyphs(glyphs, glyphWidth(glyphs), false, "")
 	}
-	return cmd
+	if multiline {
+		preview += " ↵"
+	}
+	return preview
 }
 
 func defaultHistoryFilePath() string {
@@ -229,11 +231,7 @@ func isTTY() bool {
 	if term := os.Getenv("TERM"); term == "dumb" || term == "" {
 		return false
 	}
-	fi, err := os.Stdout.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
+	return isTerminal(int(os.Stdout.Fd()))
 }
 
 const (
@@ -260,7 +258,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, usage)
 }
 
-const usage = `Usage: shlog [options] <command> [args]
+const usage = `Usage: shlog [options] <command> [args] [options]
 
 Commands:
   del <selection>                 delete entries matching selection
@@ -274,12 +272,15 @@ Commands:
   stats [<selection>]             show entry count, unique commands, and top 10
   pick [<selection>]              interactively pick entries and print their commands
   pick --multi [<selection>]      pick multiple entries
+  pick --unique [<selection>]     group identical commands, keeping the latest row
+  pick --sort <order> [<sel>]     order by newest (default), relevance, or frequency
+  del --pick --sort <order>       choose individual entries in that order
   undo                            restore history from the last backup
   completion <shell>              print shell completion script (zsh, bash, fish)
   version                         print the current version
   help                            print this help
 
-Options:
+Options (before or after the command; -- ends option parsing):
   -f              force: never ask for confirmation
   -s, --dry-run   simulate: only output what would be changed
   -o              output: print what the history file would look like (no write, no confirmation)
@@ -288,9 +289,16 @@ Options:
 
 Interactive picker (macOS/Linux):
   Full-screen fuzzy search with multiline preview and mouse support.
-  Results stay newest-first. Tab marks entries in multi-select mode.
+  Click [ newest first ] or press Ctrl-S to cycle result sorting.
+  Tab marks entries in multi-select mode; output remains newest-first.
   Enter accepts; Esc/Ctrl-C cancels; F1 shows syntax and controls.
   Uses the controlling terminal, including with redirected stdout.
+
+Exit statuses:
+  0 success (including clean with no duplicates and -o with no changes)
+  1 no matching entries
+  2 invalid arguments, I/O failures, or terminal errors
+  130 canceled picker or declined confirmation
 
 Selections (for del, clean, list, grep, pick, and stats):
   -N              last N entries (e.g. -1, -100)

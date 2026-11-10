@@ -8,14 +8,14 @@ import (
 func runCompletion(args []string) {
 	if len(args) != 1 {
 		fmt.Fprintln(os.Stderr, "error: completion requires exactly one shell argument: zsh, bash, or fish")
-		os.Exit(1)
+		os.Exit(exitError)
 	}
 	script, err := completionScript(args[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		os.Exit(exitError)
 	}
-	fmt.Print(script)
+	printOutput("%s", script)
 }
 
 func completionScript(shell string) (string, error) {
@@ -35,14 +35,17 @@ const zshCompletion = `#compdef shlog
 
 _shlog() {
   local state
+  local -a global_opts
+  global_opts=(
+    '-f[force: skip confirmation prompt]'
+    '-s[simulate: show what would change without writing]'
+    '--dry-run[simulate: show what would change without writing]'
+    '-o[output: print resulting file content without writing]'
+    '--histfile[use custom history file instead of default]:file:_files'
+    '(- *)'{-h,--help}'[print help]'
+  )
 
-  _arguments \
-    '-f[force: skip confirmation prompt]' \
-    '-s[simulate: show what would change without writing]' \
-    '--dry-run[simulate: show what would change without writing]' \
-    '-o[output: print resulting file content without writing]' \
-    '--histfile[use custom history file instead of default]:file:_files' \
-    '(- *)'{-h,--help}'[print help]' \
+  _arguments "${global_opts[@]}" \
     '1:command:->command' \
     '*::args:->args'
 
@@ -65,18 +68,24 @@ _shlog() {
     args)
       case $words[1] in
         del)
-          _arguments \
+          _arguments "${global_opts[@]}" \
             '--match[regex pattern to match against command text]:pattern' \
             '--invert[delete entries that do NOT match (requires --match)]' \
-            '--pick[interactively select entries to delete]'
+            '--pick[interactively select entries to delete]' \
+            '--sort[result ordering (requires --pick)]:order:(newest relevance frequency)'
           ;;
         clean)
-          _arguments \
+          _arguments "${global_opts[@]}" \
             '--keep-oldest[keep the first occurrence instead of the most recent]'
           ;;
         pick)
-          _arguments \
-            '--multi[select multiple entries]'
+          _arguments "${global_opts[@]}" \
+            '--multi[select multiple entries]' \
+            '--unique[group identical commands]' \
+            '--sort[result ordering]:order:(newest relevance frequency)'
+          ;;
+        list|grep|stats|undo|version|help)
+          _arguments "${global_opts[@]}"
           ;;
         completion)
           local shells=(zsh bash fish)
@@ -103,40 +112,71 @@ const bashCompletion = `_shlog() {
   local commands="del clean list grep stats pick undo completion version help"
   local global_opts="-f -s --dry-run -o --histfile -h --help"
 
-  # Complete --histfile argument with file paths
-  if [[ "$prev" == "--histfile" ]]; then
-    COMPREPLY=()
-    while IFS= read -r; do
-      COMPREPLY+=("$REPLY")
-    done < <(compgen -f -- "$cur")
-    return
-  fi
-
-  # Find the subcommand (first non-flag argument after position 0)
-  local cmd=""
-  local i
+  # Track literal arguments and opaque values before choosing completions.
+  local cmd="" expecting="" literal=0
+  local i word
   for ((i=1; i < cword; i++)); do
-    case "${words[$i]}" in
-      --histfile) ((i++)) ;;
-      -*) ;;
-      *) cmd="${words[$i]}"; break ;;
+    word="${words[$i]}"
+    if [[ -n "$expecting" ]]; then
+      expecting=""
+      continue
+    fi
+    if (( literal )); then
+      continue
+    fi
+    case "$word" in
+      --) literal=1 ;;
+      --histfile) expecting=file ;;
+      --histfile=*) ;;
+      -f|-s|--dry-run|-o|-h|--help) ;;
+      *)
+        if [[ -z "$cmd" ]]; then
+          cmd="$word"
+        elif [[ "$cmd" == "del" && "$word" == "--match" ]]; then
+          expecting=pattern
+        elif [[ ( "$cmd" == "pick" || "$cmd" == "del" ) && "$word" == "--sort" ]]; then
+          expecting=sort
+        fi
+        ;;
     esac
   done
+  COMPREPLY=()
+  if (( literal )); then
+    return
+  fi
+  case "$expecting" in
+    file)
+      while IFS= read -r; do
+        COMPREPLY+=("$REPLY")
+      done < <(compgen -f -- "$cur")
+      return
+      ;;
+    sort)
+      COMPREPLY=($(compgen -W "newest relevance frequency" -- "$cur"))
+      return
+      ;;
+    pattern) return ;;
+  esac
 
   case "$cmd" in
     del)
       if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "--match --invert --pick" -- "$cur"))
+        COMPREPLY=($(compgen -W "$global_opts --match --invert --pick --sort" -- "$cur"))
       fi
       ;;
     clean)
       if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "--keep-oldest" -- "$cur"))
+        COMPREPLY=($(compgen -W "$global_opts --keep-oldest" -- "$cur"))
       fi
       ;;
     pick)
       if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "--multi" -- "$cur"))
+        COMPREPLY=($(compgen -W "$global_opts --multi --unique --sort" -- "$cur"))
+      fi
+      ;;
+    list|grep|stats|undo|version|help)
+      if [[ "$cur" == -* ]]; then
+        COMPREPLY=($(compgen -W "$global_opts" -- "$cur"))
       fi
       ;;
     completion)
@@ -184,11 +224,16 @@ complete -c shlog -n '__fish_seen_subcommand_from del'   -l match -r -d 'regex p
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l invert -d 'delete entries that do NOT match (requires --match)'
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l pick   -d 'interactively select entries to delete'
 
+complete -c shlog -n '__fish_seen_subcommand_from del'   -l sort -x -a 'newest relevance frequency' -d 'result ordering (requires --pick)'
+
 # clean subcommand options
 complete -c shlog -n '__fish_seen_subcommand_from clean' -l keep-oldest -d 'keep the first occurrence instead of the most recent'
 
 # pick subcommand options
 complete -c shlog -n '__fish_seen_subcommand_from pick'  -l multi -d 'select multiple entries'
+
+complete -c shlog -n '__fish_seen_subcommand_from pick' -l unique -d 'group identical commands'
+complete -c shlog -n '__fish_seen_subcommand_from pick' -l sort -x -a 'newest relevance frequency' -d 'result ordering'
 
 # completion subcommand: suggest shell names
 complete -c shlog -n '__fish_seen_subcommand_from completion' -a 'zsh bash fish' -d 'shell'

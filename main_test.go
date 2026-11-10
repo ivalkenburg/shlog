@@ -96,3 +96,19 @@ func TestColorHighlightSkipsEmptyMatches(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+func TestColorRequiresActualTerminal(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("NO_COLOR", "")
+	device, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Close()
+	previous := os.Stdout
+	os.Stdout = device
+	t.Cleanup(func() { os.Stdout = previous })
+	if isTTY() {
+		t.Fatal("character device /dev/null was treated as a terminal")
+	}
+}

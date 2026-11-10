@@ -165,6 +165,8 @@ func pickerControlKey(c byte) string {
 		return "ctrl-n"
 	case 16:
 		return "ctrl-p"
+	case 19:
+		return "ctrl-s"
 	case 21:
 		return "ctrl-u"
 	case 23:
