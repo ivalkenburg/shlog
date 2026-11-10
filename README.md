@@ -34,7 +34,7 @@ cd shlog
 go build -o shlog .
 ```
 
-`pick` and `del --pick` also need [fzf](https://github.com/junegunn/fzf).
+Interactive picking is built in on macOS and Linux. No additional tools are required.
 
 ## Usage
 
@@ -49,9 +49,9 @@ shlog [options] <command> [args]
 | `stats [<selection>]` | Entry count, unique commands and the 10 most used |
 | `del <selection>` | Delete entries |
 | `del --match <pattern> [--invert]` | Delete entries that match (or don't match) a regex |
-| `del --pick [<selection>]` | Choose entries to delete in fzf |
+| `del --pick [<selection>]` | Interactively choose entries to delete |
 | `clean [--keep-oldest] [<selection>]` | Remove duplicates, keeping the newest (or oldest) copy |
-| `pick [--multi] [<selection>]` | Choose entries in fzf and print their commands |
+| `pick [--multi] [<selection>]` | Interactively choose entries and print their commands |
 | `undo` | Restore the file from the last backup |
 | `completion <shell>` | Print a completion script for zsh, bash or fish |
 | `version` | Print the version |
@@ -95,6 +95,75 @@ shlog stats -168h                # stats for the last week
 eval "$(shlog pick)"             # pick a command and run it again
 ```
 
+### Interactive picker
+
+`pick` and `del --pick` open a full-screen picker with compact command rows and a
+scrollable command preview below. Results stay newest-first. Each row shows the
+original history index and timestamp when the terminal is wide enough; the
+preview shows the full timestamp. Search covers the complete command, including
+multiline content, rather than the displayed index or timestamp.
+
+Type to search, use the arrow keys or Ctrl-P/Ctrl-N to move, and press Enter to
+accept. Esc or Ctrl-C cancels. F1 opens the complete search and control reference.
+The picker uses the terminal's palette and respects `NO_COLOR`.
+
+With `pick --multi` or `del --pick`, Tab toggles the focused entry and moves down;
+Shift-Tab toggles and moves up. Marks persist when a changed query hides entries,
+and the selected count includes hidden marks. Enter accepts all marked entries,
+or the focused entry when nothing is marked. Selected commands are printed
+newest-first, regardless of marking order. A valid query with no matches can
+still accept hidden marks; incomplete syntax blocks acceptance.
+
+The mouse wheel scrolls results, or the preview when the pointer is over it.
+Click a row to focus it, click its `[ ]` marker to toggle selection, or
+double-click a row to accept, like Enter. Alt-Up/Alt-Down also scroll the preview.
+The preview wraps long commands and reveals the first matching line with context.
+Deletion still asks for confirmation after the picker closes unless `-f` is set.
+
+Search supports ordered fuzzy subsequences and extended expressions:
+
+```text
+gco                 fuzzy: git checkout
+git main            git AND main, in either order
+git main | dev      git AND (main OR dev)
+'checkout           exact substring
+'git'               exact word
+^git                command prefix
+main$               command suffix
+^pwd$               whole command
+!sudo               exclude an exact substring
+!^sudo              exclude a prefix
+!log$               exclude a suffix
+!'gco               exclude a fuzzy subsequence
+'git\ checkout      exact substring containing a space
+\!sudo              literal !sudo
+\|                  literal pipe
+\\                  literal backslash
+```
+
+OR joins adjacent terms; parentheses are ordinary search characters. Backslash
+escapes operators (`!`, `'`, `^`, `$`, `|`, `\`) and whitespace, and is preserved
+before ordinary characters. Anchors refer to the beginning/end of the complete
+command, including multiline entries. Fuzzy search matches omitted characters;
+it does not correct spelling mistakes or transpositions.
+
+Lowercase terms ignore case. A term containing uppercase is case-sensitive, so
+`Git main` requires `Git` but allows `MAIN`. Unaccented Latin terms also match
+accented letters (`cafe` matches `café`); explicitly accented terms preserve that
+distinction. Match quality determines highlighting, while result order stays
+newest-first.
+
+The search prompt supports Left/Right, Home/End or Ctrl-A/Ctrl-E,
+Backspace/Delete, Ctrl-U to clear, and Ctrl-W to erase the previous word.
+Pasted newlines and tabs become spaces, and bracketed paste cannot accidentally
+accept a command. Page-Up/Page-Down move through results. Ctrl-Z suspends the
+picker; the shell's `fg` resumes it.
+
+Interaction uses the controlling terminal, keeping stdout available for command
+substitution and redirection. The picker requires a capable terminal at least
+30 columns wide and 10 rows high. Without a controlling terminal, or with
+`TERM=dumb`, use `list`, `grep`, or `del --match` for noninteractive work.
+
 ### Which file it edits
 
 shlog uses `$HISTFILE` if it is set. Otherwise it picks the fish, bash or zsh
@@ -124,3 +193,5 @@ shlog completion fish > ~/.config/fish/completions/shlog.fish
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Unicode display tables use Unicode data under the [Unicode License V3](UNICODE-LICENSE).

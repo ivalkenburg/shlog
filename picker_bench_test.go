@@ -1,0 +1,85 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+)
+
+func benchmarkPicker(lines, lineBytes int) *pickerModel {
+	entries := make([]*Entry, 40)
+	for i := range entries {
+		command := fmt.Sprintf("git checkout feature/%d\n", i) + strings.Repeat("echo cafe && printf payload-1234567890\n", lines)
+		if lineBytes > 0 {
+			command = "git checkout " + strings.Repeat("payload ", lineBytes/8)
+		}
+		entries[i] = &Entry{Raw: []string{command}}
+	}
+	m := newPickerModel(entries, entries, pickerOptions{multi: true, path: "history"})
+	m.width, m.height = 100, 32
+	m.setQuery("cafe")
+	if lineBytes > 0 {
+		m.setQuery("gco")
+	}
+	matches, _ := filterPicker(context.Background(), m.items, m.query)
+	m.applyMatches(matches, -1)
+	m.render(true)
+	return m
+}
+
+func BenchmarkPickerRenderMultiline(b *testing.B) {
+	for _, lines := range []int{100, 1000} {
+		b.Run(fmt.Sprint(lines), func(b *testing.B) {
+			m := benchmarkPicker(lines, 0)
+			b.ReportAllocs()
+			for b.Loop() {
+				m.render(true)
+			}
+		})
+	}
+}
+
+func BenchmarkPickerPreviewScroll(b *testing.B) {
+	m := benchmarkPicker(1000, 0)
+	delta := 1
+	b.ReportAllocs()
+	for b.Loop() {
+		m.scrollPreview(delta)
+		m.render(true)
+		delta = -delta
+	}
+}
+
+func BenchmarkPickerFocusMovement(b *testing.B) {
+	m := benchmarkPicker(1000, 0)
+	delta := 1
+	b.ReportAllocs()
+	for b.Loop() {
+		m.move(delta)
+		m.render(true)
+		delta = -delta
+	}
+}
+
+func BenchmarkPickerWrapCold(b *testing.B) {
+	for _, lines := range []int{100, 1000} {
+		b.Run(fmt.Sprint(lines), func(b *testing.B) {
+			text := "git checkout\n" + strings.Repeat("echo cafe && printf payload-1234567890\n", lines)
+			query, _ := parseSearch("cafe")
+			positions := query.positions(newSearchText(text))
+			b.ReportAllocs()
+			for b.Loop() {
+				wrapPickerText(text, positions, 98)
+			}
+		})
+	}
+}
+
+func BenchmarkPickerRenderLongLine(b *testing.B) {
+	m := benchmarkPicker(0, 100_000)
+	b.ReportAllocs()
+	for b.Loop() {
+		m.render(true)
+	}
+}

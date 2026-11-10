@@ -61,7 +61,7 @@ func runDel(args []string, force, simulate, output bool, histFile string) {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		toDelete, err = pickWithFzf(entries, pool, true)
+		toDelete, err = pickEntries(entries, pool, pickerOptions{multi: true, deleting: true, path: histFile})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)

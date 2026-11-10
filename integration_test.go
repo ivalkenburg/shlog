@@ -350,31 +350,29 @@ func TestCleanKeepOldest_vs_Default(t *testing.T) {
 	}
 }
 
-// TestDelPick_NoFzf verifies that del --pick returns a clear error when fzf
-// is not available.
-func TestDelPick_NoFzf(t *testing.T) {
+func TestDelPickRequiresCapableTerminal(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
+	t.Setenv("TERM", "dumb")
 	hist := writeTempHistory(t, singleLineHistory)
 	out, err := runGoshist(t, "--histfile", hist, "del", "--pick")
 	if err == nil {
-		t.Fatal("expected non-zero exit when fzf is not available")
+		t.Fatal("expected an error for an incapable terminal")
 	}
-	if !strings.Contains(out, "fzf") {
-		t.Errorf("error should mention fzf, got: %s", out)
+	if !strings.Contains(out, "terminal") {
+		t.Errorf("error should mention the terminal, got: %s", out)
 	}
 }
 
-// TestPick_NoFzf verifies that pick returns a clear error when fzf is not
-// available.
-func TestPick_NoFzf(t *testing.T) {
+func TestPickRequiresCapableTerminal(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
+	t.Setenv("TERM", "dumb")
 	hist := writeTempHistory(t, singleLineHistory)
 	out, err := runGoshist(t, "--histfile", hist, "pick")
 	if err == nil {
-		t.Fatal("expected non-zero exit when fzf is not available")
+		t.Fatal("expected an error for an incapable terminal")
 	}
-	if !strings.Contains(out, "fzf") {
-		t.Errorf("error should mention fzf, got: %s", out)
+	if !strings.Contains(out, "terminal") {
+		t.Errorf("error should mention the terminal, got: %s", out)
 	}
 }
 
@@ -687,34 +685,6 @@ func TestCleanScoped(t *testing.T) {
 	}
 }
 
-func TestPickPrintsFullCommandAndDelPickDeletesWholeEntry(t *testing.T) {
-	fakeFzf(t, "/bin/cat\n")
-	original := ": 1000:0;keep\n: 1001:0;first line\\\nsecond line\n"
-	hist := writeTempHistory(t, original)
-	out, err := runGoshist(t, "--histfile", hist, "pick", "-1")
-	if err != nil || out != "first line\nsecond line\n" {
-		t.Fatalf("pick output = %q, err=%v", out, err)
-	}
-	assertFileContent(t, hist, original)
-	assertNoBackup(t, hist)
-	if out, err := runGoshist(t, "--histfile", hist, "-f", "del", "--pick", "-1"); err != nil {
-		t.Fatalf("del --pick: %v\n%s", err, out)
-	}
-	assertFileContent(t, hist, ": 1000:0;keep\n")
-	assertFileContent(t, hist+".bak", original)
-}
-
-func TestDelPickCancelledOutput(t *testing.T) {
-	fakeFzf(t, "/bin/cat > /dev/null\nexit 130\n")
-	hist := writeTempHistory(t, singleLineHistory)
-	out, err := runGoshist(t, "--histfile", hist, "-o", "del", "--pick")
-	if err != nil || out != singleLineHistory {
-		t.Fatalf("cancelled pick output = %q, err=%v", out, err)
-	}
-	assertFileContent(t, hist, singleLineHistory)
-	assertNoBackup(t, hist)
-}
-
 func TestStatsBeforeUnixEpoch(t *testing.T) {
 	t.Setenv("TZ", "UTC")
 	hist := writeTempHistory(t, "- cmd: ls\n  when: -86400\n- cmd: pwd\n  when: -1\n")
@@ -760,17 +730,6 @@ func TestGrepScopedPreservesHistoryIndex(t *testing.T) {
 	if err != nil || out != "3  —  echo last\n" {
 		t.Fatalf("scoped grep output = %q, err=%v", out, err)
 	}
-	assertNoBackup(t, hist)
-}
-
-func TestDelPickIgnoresPrintedQuery(t *testing.T) {
-	fakeFzf(t, "printf '1\\n'\n/bin/cat\n")
-	hist := writeTempHistory(t, "keep me\necho 1\n")
-	out, err := runGoshist(t, "--histfile", hist, "-o", "del", "--pick", "-1")
-	if err != nil || out != "keep me\n" {
-		t.Fatalf("printed query changed deletion scope: output=%q, error=%v", out, err)
-	}
-	assertFileContent(t, hist, "keep me\necho 1\n")
 	assertNoBackup(t, hist)
 }
 
@@ -833,16 +792,4 @@ func TestZshEntriesWithoutTimestampsArePreserved(t *testing.T) {
 	}
 	assertFileContent(t, hist, "old plain\n: 1000:0;timed\n")
 	assertFileContent(t, hist+".bak", original)
-}
-
-func TestPickDecodesZshCommand(t *testing.T) {
-	fakeFzf(t, "/bin/cat\n")
-	// Bytes as zsh writes them: "\u2014" is metafied and each newline is escaped.
-	original := ": 1000:0;for x in \xe2\x80\x83\xb4\\\ndo echo $x\\\ndone\n"
-	hist := writeTempHistory(t, original)
-	out, err := runGoshist(t, "--histfile", hist, "pick")
-	if want := "for x in —\ndo echo $x\ndone\n"; err != nil || out != want {
-		t.Fatalf("pick = %q, err=%v; want %q", out, err, want)
-	}
-	assertFileContent(t, hist, original)
 }

@@ -164,7 +164,7 @@ func printIndexed(all, toShow []*Entry, highlight *regexp.Regexp) {
 	}
 }
 
-// writeIndexed is shared by terminal output and fzf's input, which never uses color.
+// writeIndexed formats indexed output for list and grep.
 func writeIndexed(w io.Writer, all, toShow []*Entry, highlight *regexp.Regexp, color bool) error {
 	indexOf := make(map[*Entry]int, len(all))
 	for i, e := range all {
@@ -266,13 +266,13 @@ Commands:
   del <selection>                 delete entries matching selection
   del --match <pattern>           delete entries whose command matches a regex
   del --match <pattern> --invert  delete entries that do NOT match the regex
-  del --pick [<selection>]        interactively pick entries to delete (requires fzf)
+  del --pick [<selection>]        interactively pick entries to delete
   clean [<selection>]             remove duplicates (optionally scoped to selection)
   clean --keep-oldest [<sel>]     remove duplicates, keeping first occurrence instead of last
   list [<selection>]              print entries with index and timestamp
   grep <pattern> [<selection>]    print matching entries with index and timestamp
   stats [<selection>]             show entry count, unique commands, and top 10
-  pick [<selection>]              interactively pick entries and print their commands (requires fzf)
+  pick [<selection>]              interactively pick entries and print their commands
   pick --multi [<selection>]      pick multiple entries
   undo                            restore history from the last backup
   completion <shell>              print shell completion script (zsh, bash, fish)
@@ -285,6 +285,12 @@ Options:
   -o              output: print what the history file would look like (no write, no confirmation)
   --histfile <p>  use <p> instead of the default history file
   -h, --help      print this help
+
+Interactive picker (macOS/Linux):
+  Full-screen fuzzy search with multiline preview and mouse support.
+  Results stay newest-first. Tab marks entries in multi-select mode.
+  Enter accepts; Esc/Ctrl-C cancels; F1 shows syntax and controls.
+  Uses the controlling terminal, including with redirected stdout.
 
 Selections (for del, clean, list, grep, pick, and stats):
   -N              last N entries (e.g. -1, -100)

@@ -54,7 +54,7 @@ _shlog() {
         'list:print entries with index and timestamp'
         'grep:search entries with a regex pattern'
         'stats:show history statistics'
-        'pick:interactively pick entries and print their commands (requires fzf)'
+        'pick:interactively pick entries and print their commands'
         'undo:restore history from last backup'
         'completion:print shell completion script'
         'version:print the current version'
@@ -68,7 +68,7 @@ _shlog() {
           _arguments \
             '--match[regex pattern to match against command text]:pattern' \
             '--invert[delete entries that do NOT match (requires --match)]' \
-            '--pick[interactively select entries to delete using fzf]'
+            '--pick[interactively select entries to delete]'
           ;;
         clean)
           _arguments \
@@ -173,7 +173,7 @@ complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a clean      -d 'r
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a list       -d 'print entries with index and timestamp'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a grep       -d 'search entries with a regex pattern'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a stats      -d 'show history statistics'
-complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a pick       -d 'interactively pick entries using fzf'
+complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a pick       -d 'interactively pick entries and print their commands'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a undo       -d 'restore history from last backup'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a completion -d 'print shell completion script'
 complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a version    -d 'print the current version'
@@ -182,7 +182,7 @@ complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a help       -d 'p
 # del subcommand options
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l match -r -d 'regex pattern to match against command text'
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l invert -d 'delete entries that do NOT match (requires --match)'
-complete -c shlog -n '__fish_seen_subcommand_from del'   -l pick   -d 'interactively select entries to delete using fzf'
+complete -c shlog -n '__fish_seen_subcommand_from del'   -l pick   -d 'interactively select entries to delete'
 
 # clean subcommand options
 complete -c shlog -n '__fish_seen_subcommand_from clean' -l keep-oldest -d 'keep the first occurrence instead of the most recent'

@@ -1,12 +1,14 @@
 # shlog
 
-Go CLI for inspecting and editing shell history files. Single `main` package, stdlib only (no deps; keep it that way). fzf is an optional runtime tool, shelled out to in `fzf.go`.
+Go CLI for inspecting and editing shell history files. Single `main` package, stdlib only (no deps; keep it that way). Interactive picking is built in for macOS and Linux.
 
 ## Layout
 
 - `main.go`: flag parsing, command dispatch, usage text, default history file resolution.
 - `cmd_*.go`: one file per command.
 - `history.go`: parsing, format detection, selections, atomic write, backup.
+- `search.go`: extended fuzzy query parsing, matching, and highlight alignment.
+- `picker*.go`, `terminal*.go`: picker state, rendering, input, and OS-specific terminal handling. UI/input use the controlling terminal; stdout stays available for command output. Stop the input reader and restore terminal state before returning.
 - `completion.go`: zsh/bash/fish completion scripts. Update when adding commands or flags.
 - Tests: `history_test.go`, `completion_test.go`, `integration_test.go`.
 
