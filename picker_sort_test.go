@@ -44,7 +44,10 @@ func TestPickerSortOrder(t *testing.T) {
 		want                 []int
 	}{
 		{"newest", "git checkout\ngiant careful operation\n", "gco", pickerNewest, false, []int{2, 1}},
+		{"sparse relevance", "git checkout\nxgitlong\npwd\n", "'git", pickerRelevance, false, []int{1, 2}},
 		{"relevance", "git checkout\ngiant careful operation\n", "gco", pickerRelevance, false, []int{1, 2}},
+		{"repeated relevance", "echo git status\ngit status\necho git status\ngit status\n", "git", pickerRelevance, false, []int{4, 2, 3, 1}},
+		{"exact boundary", "xxgit git\nxgitlong\n", "'git", pickerRelevance, false, []int{1, 2}},
 		{"exact", "git status\necho git status\n", "'git", pickerRelevance, false, []int{1, 2}},
 		{"shorter", "git\ngit status\n", "git", pickerRelevance, false, []int{1, 2}},
 		{"recency tie", "git a\ngit b\n", "git", pickerRelevance, false, []int{2, 1}},
@@ -122,6 +125,30 @@ func TestPickerSortControlFits(t *testing.T) {
 			first := pickerANSI.ReplaceAllString(pickerFrameRows(m.render(false))[0], "")
 			if !strings.Contains(first, badge) {
 				t.Fatalf("sort control truncated at width %d: %q", width, first)
+			}
+		}
+	}
+}
+
+func TestPickerRelevanceRepeatedCommands(t *testing.T) {
+	all := parseHistoryData([]byte("git checkout\nsudo nope\ncafé\ngit checkout\nsudo nope\ncafé\n"))
+	for _, unique := range []bool{false, true} {
+		model := newPickerModel(all, all, pickerOptions{unique: unique})
+		// Removing repetition metadata forces independent scoring of every row.
+		// Both paths must preserve the same entries, exclusions, and tie breaks.
+		uncached := slices.Clone(model.items)
+		for i := range uncached {
+			uncached[i].repeated = false
+		}
+		for _, query := range []string{"gco", "!sudo cafe", "git | !sudo", "!'gco cafe", "missing", "'café", "cafe"} {
+			q, err := parseSearch(query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := filterPicker(context.Background(), model.items, q, pickerRelevance)
+			want, wantOK := filterPicker(context.Background(), uncached, q, pickerRelevance)
+			if !ok || !wantOK || !slices.Equal(got, want) {
+				t.Fatalf("unique=%t query=%q got %v want %v", unique, query, got, want)
 			}
 		}
 	}

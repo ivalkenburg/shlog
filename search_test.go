@@ -29,6 +29,7 @@ func TestExtendedSearch(t *testing.T) {
 		{"cafe", "café", true}, {"café", "cafe", false}, {"café", "CAFÉ", true},
 		{"Cafe", "Café", true}, {"Cafe", "café", false}, {"cafe", "cafe\u0301", true},
 		{"'cafe", "cafe\u0301", true}, {"ΑΒ", "αβ", false}, {"αβ", "ΑΒ", true},
+		{"ǅ", "ǆ", false}, {"ǅ", "ǅ", true}, {"ǆ", "ǅ", true},
 		{"你好", "echo 你好世界", true}, {"\U0001f600", "echo \U0001f600", true},
 		{`\!sudo`, "echo !sudo", true}, {`\!sudo`, "sudo", false}, {`\|`, "a | b", true},
 		{`\^git\$`, "echo ^git$", true}, {`'git\ checkout`, "git checkout", true},
@@ -74,6 +75,9 @@ func TestSearchHighlightAlignment(t *testing.T) {
 		{"gco", "git checkout", []int{0, 4, 9}},
 		{"cafe", "cafe\u0301", []int{0, 1, 2, 3}},
 		{"é", "café", []int{3}},
+		{"cafe É", "Café É", []int{0, 1, 2, 3, 5}},
+		{"É cafe", "É Café", []int{0, 2, 3, 4, 5}},
+		{"café cafe", "cafe café", []int{0, 1, 2, 3, 5, 6, 7, 8}},
 		{"'你好", "echo 你好", []int{5, 6}},
 		{"main$", "main main", []int{5, 6, 7, 8}},
 		{"!sudo", "git log", nil},
@@ -195,6 +199,11 @@ func FuzzExtendedSearch(f *testing.F) {
 	f.Add("\xc8A\u0368", "\x8d")
 	for _, seed := range [][2]string{{"gco", "git checkout"}, {"^git !sudo", "git main"}, {"cafe", "cafe\u0301"}, {"αβ | 你好", "ΑΒ你好"}, {`\\ \!`, "\\!"}} {
 		f.Add(seed[0], seed[1])
+	}
+	for _, base := range []string{"a", "ab", "é"} {
+		literal := strings.Repeat(base, 40)
+		f.Add("'"+literal, strings.Repeat(literal, 3))
+		f.Add("'"+literal+"'", strings.Repeat(literal, 3)+" "+literal)
 	}
 	f.Fuzz(func(t *testing.T, query, text string) {
 		if len(query) > 256 || len(text) > 512 {

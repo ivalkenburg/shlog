@@ -50,6 +50,7 @@ type pickerItem struct {
 	text      searchText
 	count     int
 	duplicate bool // An older occurrence of the same exact command.
+	repeated  bool // More than one picker row contains this exact command.
 }
 
 type pickerModel struct {
@@ -127,6 +128,7 @@ func newPickerModel(all, pool []*Entry, options pickerOptions) *pickerModel {
 	}
 	for i := range m.items {
 		m.items[i].count = counts[m.items[i].text.text].count
+		m.items[i].repeated = !options.unique && m.items[i].count > 1
 		if !options.unique && m.items[i].count > 1 {
 			if m.groups == nil {
 				m.groups = make(map[string][]int)
@@ -242,6 +244,12 @@ func filterPicker(ctx context.Context, items []pickerItem, q searchQuery, order 
 	var matches []int
 	type rank struct{ score, length int }
 	var ranks []rank
+	rankOffset := 0
+	type result struct {
+		rank
+		matched bool
+	}
+	var repeated map[string]result
 	var work searchWorkspace
 	rankMatches := order == pickerRelevance && q.hasPositiveTerms()
 	for i := range items {
@@ -255,20 +263,38 @@ func filterPicker(ctx context.Context, items []pickerItem, q searchQuery, order 
 		if order == pickerFrequency && items[i].duplicate {
 			continue
 		}
-		if q.matches(items[i].text) {
-			if matches == nil {
-				matches = make([]int, 0, len(items))
-			}
-			matches = append(matches, i)
-			if rankMatches {
-				if ranks == nil {
-					ranks = make([]rank, len(items))
-				}
+		var r result
+		cached := false
+		if rankMatches && items[i].repeated {
+			r, cached = repeated[items[i].text.text]
+		}
+		if !cached {
+			r.matched = q.matches(items[i].text)
+			if rankMatches && r.matched {
 				score, ok := q.score(ctx, items[i].text, &work)
 				if !ok {
 					return nil, false
 				}
-				ranks[i] = rank{score, utf8.RuneCountInString(items[i].text.text)}
+				r.rank = rank{score, utf8.RuneCountInString(items[i].text.text)}
+			}
+			if rankMatches && items[i].repeated {
+				if repeated == nil {
+					repeated = make(map[string]result)
+				}
+				repeated[items[i].text.text] = r
+			}
+		}
+		if r.matched {
+			if matches == nil {
+				matches = make([]int, 0, len(items)-i)
+			}
+			matches = append(matches, i)
+			if rankMatches {
+				if ranks == nil {
+					rankOffset = i
+					ranks = make([]rank, len(items)-i)
+				}
+				ranks[i-rankOffset] = r.rank
 			}
 		}
 	}
@@ -279,10 +305,10 @@ func filterPicker(ctx context.Context, items []pickerItem, q searchQuery, order 
 					return d
 				}
 			} else {
-				if d := ranks[b].score - ranks[a].score; d != 0 {
+				if d := ranks[b-rankOffset].score - ranks[a-rankOffset].score; d != 0 {
 					return d
 				}
-				if d := ranks[a].length - ranks[b].length; d != 0 {
+				if d := ranks[a-rankOffset].length - ranks[b-rankOffset].length; d != 0 {
 					return d
 				}
 			}
