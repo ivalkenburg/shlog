@@ -261,6 +261,48 @@ func TestHistoryWritesPreservePermissions(t *testing.T) {
 	}
 }
 
+func TestReplaceHistoryBackupFailureLeavesHistoryUntouched(t *testing.T) {
+	original := "ls\npwd\n"
+	path := writeTempHistory(t, original)
+	if err := os.Mkdir(path+".bak", 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(path+".bak", "keep")
+	if err := os.WriteFile(marker, []byte("occupied backup\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceHistoryFile(path, []byte(original), parseHistoryData([]byte("changed\n"))); err == nil {
+		t.Fatal("history was replaced without creating its backup")
+	}
+	assertFileContent(t, path, original)
+	assertFileContent(t, marker, "occupied backup\n")
+	if leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".hist_tmp_*")); err != nil || len(leftovers) != 0 {
+		t.Fatalf("failed backup left temporary files: %v, %v", leftovers, err)
+	}
+}
+
+func TestRestoreBackupCopyFailurePreservesBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(path, "keep")
+	if err := os.WriteFile(marker, []byte("not a history file\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".bak", []byte("previous\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreBackup(path); err == nil {
+		t.Fatal("undo replaced a directory after failing to back it up")
+	}
+	assertFileContent(t, marker, "not a history file\n")
+	assertFileContent(t, path+".bak", "previous\n")
+	if leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".hist_tmp_*")); err != nil || len(leftovers) != 0 {
+		t.Fatalf("failed undo left temporary files: %v, %v", leftovers, err)
+	}
+}
+
 func TestHistoryWritesFollowSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "actual_history")
@@ -1909,6 +1951,27 @@ func TestDefaultHistoryFilePath_ZshFromSHELL(t *testing.T) {
 	}
 }
 
+func TestDefaultHistoryFilePath_XDGDataHome(t *testing.T) {
+	dataHome := filepath.Join(t.TempDir(), "custom data")
+	t.Setenv("HISTFILE", "")
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("SHELL", "/usr/bin/fish")
+	if got, want := defaultHistoryFilePath(), filepath.Join(dataHome, "fish", "fish_history"); got != want {
+		t.Fatalf("fish XDG history = %q, want %q", got, want)
+	}
+	t.Setenv("HISTFILE", "/custom/history")
+	if got := defaultHistoryFilePath(); got != "/custom/history" {
+		t.Fatal("XDG_DATA_HOME overrode HISTFILE")
+	}
+	t.Setenv("HISTFILE", "")
+	for _, shell := range []string{"bash", "zsh"} {
+		t.Setenv("SHELL", "/bin/"+shell)
+		if strings.HasPrefix(defaultHistoryFilePath(), dataHome) {
+			t.Fatalf("XDG_DATA_HOME changed %s history resolution", shell)
+		}
+	}
+}
+
 func TestDefaultHistoryFilePath_UnknownShellDefaultsToZsh(t *testing.T) {
 	t.Setenv("HISTFILE", "")
 	t.Setenv("SHELL", "/bin/sh")
@@ -2230,6 +2293,28 @@ func TestWriteHistoryFileRejectsBrokenSymlink(t *testing.T) {
 	}
 	if got, err := os.Readlink(link); err != nil || got != target {
 		t.Fatalf("broken symlink was replaced: target=%q, err=%v", got, err)
+	}
+}
+
+func TestCommandText_ZshTrailingBackslashSentinel(t *testing.T) {
+	for _, tt := range []struct{ raw, want string }{
+		{": 1000:0;echo slash\\ \n", "echo slash\\"},
+		{": 1000:0;echo slash\\  \n", "echo slash\\ "},
+		{": 1000:0;echo slash\\   \n", "echo slash\\  "},
+		{": 1000:0;echo space \n", "echo space "},
+		{": 1000:0;first\\\nlast\\ \n", "first\nlast\\"},
+		// Untimestamped entries in a mixed zsh history use the same escaping.
+		{": 1000:0;other\necho slash\\ \n", "echo slash\\"},
+	} {
+		entries := parseHistoryData([]byte(tt.raw))
+		entry := entries[len(entries)-1]
+		if got := CommandText(entry); got != tt.want {
+			t.Errorf("CommandText(%q) = %q, want %q", tt.raw, got, tt.want)
+		}
+		var written strings.Builder
+		if err := writeEntries(&written, entries); err != nil || written.String() != tt.raw {
+			t.Fatalf("sentinel decoding changed raw history: %q, %v", written.String(), err)
+		}
 	}
 }
 

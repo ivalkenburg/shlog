@@ -193,6 +193,42 @@ func TestPickerMouseAndPreview(t *testing.T) {
 	}
 }
 
+func TestPickerDoubleClickRequiresConsecutiveRowClicks(t *testing.T) {
+	actions := map[string]func(*pickerModel){
+		"key":          func(m *pickerModel) { m.key(pickerEvent{key: "left"}) },
+		"query":        func(m *pickerModel) { searchPicker(t, m, "target") },
+		"sort":         func(m *pickerModel) { m.cycleSort() },
+		"resize":       func(m *pickerModel) { m.resize(80, 24) },
+		"wheel":        func(m *pickerModel) { m.mouse(pickerEvent{mouseButton: 64}, time.Now()) },
+		"header":       func(m *pickerModel) { m.mouse(pickerEvent{y: 0}, time.Now()) },
+		"other button": func(m *pickerModel) { m.mouse(pickerEvent{mouseButton: 2, y: 3}, time.Now()) },
+		"motion":       func(m *pickerModel) { m.mouse(pickerEvent{mouseButton: 32, y: 3}, time.Now()) },
+		"help": func(m *pickerModel) {
+			m.key(pickerEvent{key: "help"})
+			m.key(pickerEvent{key: "escape"})
+		},
+	}
+	for name, action := range actions {
+		t.Run(name, func(t *testing.T) {
+			all := []*Entry{{Raw: []string{"target"}}}
+			m := newPickerModel(all, all, pickerOptions{})
+			e := pickerEvent{key: "mouse", x: 8, y: 3}
+			now := time.Now()
+			if m.mouse(e, now) {
+				t.Fatal("first click accepted a command")
+			}
+			action(m)
+			if m.mouse(e, now.Add(100*time.Millisecond)) {
+				t.Fatal("intervening action left a stale double-click candidate")
+			}
+			m.mouse(pickerEvent{mouseRelease: true}, now.Add(150*time.Millisecond))
+			if !m.mouse(e, now.Add(200*time.Millisecond)) {
+				t.Fatal("consecutive row clicks with a release no longer accept")
+			}
+		})
+	}
+}
+
 func TestPickerSafeRendering(t *testing.T) {
 	text := "echo \x1b]52;c;secret\a\r\u202efake\n你好 cafe\u0301 👩‍💻"
 	lines := wrapPickerText(text, []int{5, 6}, 20)
@@ -344,8 +380,8 @@ func TestPickerDecoderChunkBoundaries(t *testing.T) {
 	if len(d.feed([]byte("\x1b"), false)) != 0 || d.feed(nil, true)[0].key != "escape" {
 		t.Fatal("standalone Escape did not time out")
 	}
-	if len(d.feed([]byte("\x1b[<0;1;1m"), false)) != 0 {
-		t.Fatal("mouse release should not become a second click")
+	if events := d.feed([]byte("\x1b[<0;1;1m"), false); len(events) != 1 || !events[0].mouseRelease {
+		t.Fatal("mouse release must be distinguished from a click")
 	}
 	for _, text := range []string{"git", "é"} {
 		d := pickerDecoder{}

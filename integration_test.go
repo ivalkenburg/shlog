@@ -680,6 +680,91 @@ func TestHistoryChangedDuringConfirmation(t *testing.T) {
 	}
 }
 
+func TestUndoRefusesChangesDuringConfirmation(t *testing.T) {
+	for _, change := range []string{"history append", "history removed", "history recreated", "backup replaced"} {
+		t.Run(change, func(t *testing.T) {
+			original, backup := "current\n", "previous\n"
+			hist := writeTempHistory(t, original)
+			if err := os.WriteFile(hist+".bak", []byte(backup), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if change == "history recreated" {
+				if err := os.Remove(hist); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, binaryPath, "--histfile", hist, "undo")
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { cancel(); cmd.Wait() })
+			if _, err := bufio.NewReader(stdout).ReadString('?'); err != nil {
+				t.Fatalf("waiting for undo confirmation: %v", err)
+			}
+			switch change {
+			case "history append":
+				original += "appended by shell\n"
+				err = os.WriteFile(hist, []byte(original), 0600)
+			case "history removed":
+				err = os.Remove(hist)
+			case "history recreated":
+				original = "" // Existence changes matter even with empty contents.
+				err = os.WriteFile(hist, nil, 0600)
+			case "backup replaced":
+				backup = "unreviewed backup\n"
+				err = os.WriteFile(hist+".bak", []byte(backup), 0600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(stdin, "yes\n"); err != nil {
+				t.Fatal(err)
+			}
+			stdin.Close()
+			if _, err := io.Copy(io.Discard, stdout); err != nil {
+				t.Fatal(err)
+			}
+			assertExitStatus(t, cmd.Wait(), exitError)
+			if !strings.Contains(stderr.String(), "changed since it was read") {
+				t.Fatalf("missing undo conflict: %s", &stderr)
+			}
+			if change == "history removed" {
+				if _, err := os.Stat(hist); !os.IsNotExist(err) {
+					t.Fatal("rejected undo recreated the removed history")
+				}
+			} else {
+				assertFileContent(t, hist, original)
+			}
+			assertFileContent(t, hist+".bak", backup)
+		})
+	}
+}
+
+func TestUndoRestoresMissingHistoryFile(t *testing.T) {
+	hist := filepath.Join(t.TempDir(), "history")
+	if err := os.WriteFile(hist+".bak", []byte("previous\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runGoshist(t, "--histfile", hist, "-f", "undo")
+	if err != nil {
+		t.Fatalf("restore missing history: %v\n%s", err, out)
+	}
+	assertFileContent(t, hist, "previous\n")
+	assertFileContent(t, hist+".bak", "previous\n")
+}
+
 func TestCleanScoped(t *testing.T) {
 	for _, keepOldest := range []bool{false, true} {
 		t.Run(fmt.Sprint(keepOldest), func(t *testing.T) {

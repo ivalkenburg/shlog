@@ -93,7 +93,10 @@ func splitHistoryLines(data []byte) []string {
 // detectFormatLines returns the history format based on the first
 // recognisable line. Returns formatBashPlain if no marker is found.
 func detectFormatLines(lines []string) histFormat {
-	for _, line := range lines {
+	for at, line := range lines {
+		if historyContinuation(lines, at) {
+			continue
+		}
 		if entryHeaderRe.MatchString(line) {
 			return formatZsh
 		}
@@ -105,6 +108,10 @@ func detectFormatLines(lines []string) histFormat {
 		}
 	}
 	return formatBashPlain
+}
+
+func historyContinuation(lines []string, at int) bool {
+	return at > 0 && strings.HasSuffix(lines[at-1], `\`)
 }
 
 // parseZshLines parses zsh history. zsh ends every line of a multi-line
@@ -151,6 +158,11 @@ func zshCommandText(lines []string) string {
 	var b strings.Builder
 	for i, line := range lines {
 		if i == len(lines)-1 || !strings.HasSuffix(line, `\`) {
+			// zsh adds a sentinel space after a final backslash (including
+			// backslash followed by spaces) so it cannot become a continuation.
+			if strings.HasSuffix(line, " ") && strings.HasSuffix(strings.TrimRight(line, " "), `\`) {
+				line = line[:len(line)-1]
+			}
 			b.WriteString(line)
 			break
 		}
@@ -180,7 +192,7 @@ func zshCommandText(lines []string) string {
 // can contain both kinds when HISTTIMEFORMAT was enabled after earlier use.
 func parseBashTimestampedLines(lines []string) []*Entry {
 	firstMarker := 0
-	for firstMarker < len(lines) && !bashTimestampRe.MatchString(lines[firstMarker]) {
+	for firstMarker < len(lines) && (historyContinuation(lines, firstMarker) || !bashTimestampRe.MatchString(lines[firstMarker])) {
 		firstMarker++
 	}
 	entries := parseBashPlainLines(lines[:firstMarker])
@@ -302,6 +314,9 @@ func ReplaceHistoryFile(path string, original []byte, entries []*Entry) error {
 	if !bytes.Equal(current, original) {
 		return fmt.Errorf("history file changed since it was read; retry the command")
 	}
+	if err := checkBackupAlias(path); err != nil {
+		return err
+	}
 	if err := BackupHistoryFile(path); err != nil {
 		return err
 	}
@@ -319,6 +334,97 @@ func writeTarget(path string) (string, error) {
 		return path, nil
 	}
 	return target, err
+}
+
+// Atomic backup replacement must not replace a symlink used to reach history.
+// Resolve directory links with the stdlib, then follow the final-component
+// chain so an intermediate history -> backup -> real chain is checked too.
+func checkBackupAlias(path string) error {
+	backup, err := canonicalEntryPath(path + ".bak")
+	if err != nil {
+		return err
+	}
+	backupInfo, err := os.Lstat(backup)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	candidate := path
+	for range 255 {
+		candidate, err = canonicalEntryPath(candidate)
+		if err != nil {
+			return err
+		}
+		info, err := os.Lstat(candidate)
+		if os.IsNotExist(err) {
+			return nil // Undo may recreate a removed history file.
+		}
+		if err != nil {
+			return err
+		}
+		if os.SameFile(info, backupInfo) {
+			same, err := sameDirectoryEntry(candidate, backup)
+			if err != nil {
+				return err
+			}
+			if same {
+				return fmt.Errorf("history path passes through its backup %q; refusing to overwrite it", backup)
+			}
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return nil
+		}
+		link, err := os.Readlink(candidate)
+		if err != nil {
+			return err
+		}
+		if filepath.IsAbs(link) {
+			candidate = link
+		} else {
+			candidate = filepath.Join(filepath.Dir(candidate), link)
+		}
+	}
+	return fmt.Errorf("too many history symlinks")
+}
+
+func canonicalEntryPath(path string) (string, error) {
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(filepath.Join(parent, filepath.Base(path)))
+}
+
+// Same inode does not imply the same directory entry: distinct hardlinks are
+// safe. A directory listing distinguishes them from case/Unicode path aliases
+// on filesystems that normalize names, without assuming volume behavior.
+func sameDirectoryEntry(a, b string) (bool, error) {
+	parentA, err := os.Stat(filepath.Dir(a))
+	if err != nil {
+		return false, err
+	}
+	parentB, err := os.Stat(filepath.Dir(b))
+	if err != nil {
+		return false, err
+	}
+	if !os.SameFile(parentA, parentB) {
+		return false, nil
+	}
+	if filepath.Base(a) == filepath.Base(b) {
+		return true, nil
+	}
+	entries, err := os.ReadDir(filepath.Dir(a))
+	if err != nil {
+		return false, err
+	}
+	foundA, foundB := false, false
+	for _, entry := range entries {
+		foundA = foundA || entry.Name() == filepath.Base(a)
+		foundB = foundB || entry.Name() == filepath.Base(b)
+	}
+	return !foundA || !foundB, nil
 }
 
 func atomicWrite(path string, mode os.FileMode, write func(io.Writer) error) error {
@@ -375,30 +481,63 @@ func BackupHistoryFile(path string) error {
 // RestoreBackup atomically restores path+".bak" and first backs up the current
 // history file. A second undo therefore restores the state before the first.
 func RestoreBackup(path string) error {
+	backup, err := readHistoryBackup(path + ".bak")
+	if err != nil {
+		return err
+	}
+	return restoreBackupData(path, backup)
+}
+
+type historyBackup struct {
+	data []byte
+	mode os.FileMode
+}
+
+func readHistoryBackup(path string) (historyBackup, error) {
+	src, err := os.Open(path)
+	if err != nil {
+		return historyBackup{}, err
+	}
+	defer src.Close()
+	info, err := src.Stat()
+	if err != nil {
+		return historyBackup{}, err
+	}
+	data, err := io.ReadAll(src)
+	return historyBackup{data, info.Mode().Perm()}, err
+}
+
+// Confirmation must apply to the exact history and backup the user reviewed.
+// Existence is checked separately so undo can restore a removed history file
+// without overwriting one recreated while the confirmation prompt was open.
+func restoreBackupIfUnchanged(path string, original []byte, existed bool, backup historyBackup) error {
+	current, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if (err == nil) != existed || !bytes.Equal(current, original) {
+		return fmt.Errorf("history file changed since it was read; retry the command")
+	}
+	currentBackup, err := os.ReadFile(path + ".bak")
+	if err != nil || !bytes.Equal(currentBackup, backup.data) {
+		return fmt.Errorf("backup changed since it was read; retry the command")
+	}
+	return restoreBackupData(path, backup)
+}
+
+func restoreBackupData(path string, backup historyBackup) error {
 	target, err := writeTarget(path)
 	if err != nil {
 		return err
 	}
-	bak := path + ".bak"
-	src, err := os.Open(bak)
-	if err != nil {
-		return err
-	}
-	info, err := src.Stat()
-	if err != nil {
-		src.Close()
-		return err
-	}
-	data, err := io.ReadAll(src)
-	src.Close()
-	if err != nil {
+	if err := checkBackupAlias(path); err != nil {
 		return err
 	}
 	if err := BackupHistoryFile(path); err != nil {
 		return err
 	}
-	return atomicWrite(target, info.Mode().Perm(), func(dst io.Writer) error {
-		_, err := dst.Write(data)
+	return atomicWrite(target, backup.mode, func(dst io.Writer) error {
+		_, err := dst.Write(backup.data)
 		return err
 	})
 }

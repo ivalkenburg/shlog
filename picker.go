@@ -45,15 +45,18 @@ type pickerOptions struct {
 }
 
 type pickerItem struct {
-	entry *Entry
-	index int
-	text  searchText
-	count int
+	entry     *Entry
+	index     int
+	text      searchText
+	count     int
+	duplicate bool // An older occurrence of the same exact command.
 }
 
 type pickerModel struct {
 	options       pickerOptions
 	items         []pickerItem
+	groups        map[string][]int // Duplicate commands, in newest-first item order.
+	commands      int
 	matches       []int
 	marked        map[int]bool
 	focus, offset int
@@ -70,6 +73,7 @@ type pickerModel struct {
 	width, height int
 	lastClick     time.Time
 	lastClickItem int
+	drag          pickerDrag
 	renderCache   pickerRenderCache
 }
 
@@ -95,21 +99,43 @@ func newPickerModel(all, pool []*Entry, options pickerOptions) *pickerModel {
 			inPool[e] = true
 		}
 	}
-	counts := make(map[string]int, len(pool))
+	type commandInfo struct{ count, first int }
+	counts := make(map[string]commandInfo, min(len(pool), len(all)))
 	for i := len(all) - 1; i >= 0; i-- {
 		if allInPool || inPool[all[i]] {
 			text := CommandText(all[i])
-			counts[text]++
-			if options.unique && counts[text] > 1 {
+			info := counts[text]
+			if info.count == 0 {
+				info.first = len(m.items)
+			}
+			info.count++
+			counts[text] = info
+			if options.unique && info.count > 1 {
 				continue
 			}
-			m.items = append(m.items, pickerItem{entry: all[i], index: i + 1, text: newSearchText(text)})
+			var prepared searchText
+			if info.count == 1 {
+				prepared = newSearchText(text)
+			} else {
+				// Search views are immutable; exact duplicates can share the
+				// latest occurrence's decoded text and normalized strings.
+				prepared = m.items[info.first].text
+			}
+			m.items = append(m.items, pickerItem{entry: all[i], index: i + 1, text: prepared, duplicate: info.count > 1})
 			m.matches = append(m.matches, len(m.items)-1)
 		}
 	}
 	for i := range m.items {
-		m.items[i].count = counts[m.items[i].text.text]
+		m.items[i].count = counts[m.items[i].text.text].count
+		if !options.unique && m.items[i].count > 1 {
+			if m.groups == nil {
+				m.groups = make(map[string][]int)
+			}
+			text := m.items[i].text.text
+			m.groups[text] = append(m.groups[text], i)
+		}
 	}
+	m.commands = len(counts)
 	if options.sort == pickerFrequency {
 		m.matches, _ = filterPicker(context.Background(), m.items, searchQuery{}, options.sort)
 	}
@@ -117,6 +143,8 @@ func newPickerModel(all, pool []*Entry, options pickerOptions) *pickerModel {
 }
 
 func (m *pickerModel) cycleSort() {
+	m.drag = pickerDrag{}
+	m.lastClickItem = -1
 	switch m.options.sort {
 	case pickerNewest:
 		m.options.sort = pickerRelevance
@@ -141,7 +169,7 @@ func (m *pickerModel) sortControl() (string, int) {
 
 func (m *pickerModel) clickedSort(e pickerEvent) bool {
 	_, start := m.sortControl()
-	return !m.help && e.mouseButton == 0 && e.y == 0 && e.x >= start && e.x < m.width-1
+	return !m.help && !e.mouseRelease && e.mouseButton == 0 && e.y == 0 && e.x >= start && e.x < m.width-1
 }
 
 func (m *pickerModel) listRows() int    { return max(1, m.height-max(2, m.height/4)-7) }
@@ -199,6 +227,8 @@ func (m *pickerModel) scrollPreview(delta int) {
 }
 
 func (m *pickerModel) setQuery(text string) {
+	m.drag = pickerDrag{}
+	m.lastClickItem = -1
 	m.acceptPending = false
 	m.query, m.queryErr = parseSearch(text)
 	clear(m.renderCache.positions)
@@ -221,6 +251,9 @@ func filterPicker(ctx context.Context, items []pickerItem, q searchQuery, order 
 				return nil, false
 			default:
 			}
+		}
+		if order == pickerFrequency && items[i].duplicate {
+			continue
 		}
 		if q.matches(items[i].text) {
 			if matches == nil {
@@ -260,7 +293,14 @@ func filterPicker(ctx context.Context, items []pickerItem, q searchQuery, order 
 }
 
 func (m *pickerModel) applyMatches(matches []int, previous int) {
+	m.drag = pickerDrag{}
+	m.lastClickItem = -1
 	m.matches, m.focus, m.offset = matches, 0, 0
+	if m.options.sort == pickerFrequency && previous >= 0 && previous < len(m.items) {
+		if group := m.groups[m.items[previous].text.text]; len(group) > 0 {
+			previous = group[0]
+		}
+	}
 	if i := slices.Index(matches, previous); i >= 0 {
 		m.focus = i
 	}
@@ -280,14 +320,30 @@ func (m *pickerModel) accept() ([]*Entry, bool) {
 	m.acceptPending = false
 	var result []*Entry
 	if len(m.marked) != 0 {
+		var seen map[string]bool
+		if m.options.sort == pickerFrequency && !m.options.deleting {
+			seen = make(map[string]bool)
+		}
 		for i, item := range m.items {
 			if m.marked[i] {
+				if seen != nil {
+					if seen[item.text.text] {
+						continue
+					}
+					seen[item.text.text] = true
+				}
 				result = append(result, item.entry)
 			}
 		}
 		return result, true
 	}
 	if i := m.focused(); i >= 0 {
+		if m.options.deleting {
+			for _, member := range m.rowItems(i) {
+				result = append(result, m.items[member].entry)
+			}
+			return result, true
+		}
 		return []*Entry{m.items[i].entry}, true
 	}
 	return nil, false
@@ -295,10 +351,13 @@ func (m *pickerModel) accept() ([]*Entry, bool) {
 
 func (m *pickerModel) toggle() {
 	if i := m.focused(); i >= 0 && m.options.multi {
-		if m.marked[i] {
-			delete(m.marked, i)
-		} else {
-			m.marked[i] = true
+		clearGroup := m.rowMark(i) == 'x'
+		for _, member := range m.rowItems(i) {
+			if clearGroup {
+				delete(m.marked, member)
+			} else {
+				m.marked[member] = true
+			}
 		}
 	}
 }
@@ -306,6 +365,10 @@ func (m *pickerModel) toggle() {
 // key edits the model and reports whether the query changed. Acceptance and
 // terminal lifecycle keys are handled by the event loop.
 func (m *pickerModel) key(e pickerEvent) bool {
+	if e.key != "mouse" {
+		m.drag = pickerDrag{}
+		m.lastClickItem = -1
+	}
 	if e.key != "enter" {
 		m.acceptPending = false
 	}
@@ -405,6 +468,12 @@ func (m *pickerModel) key(e pickerEvent) bool {
 func (m *pickerModel) mouse(e pickerEvent, now time.Time) bool {
 	m.acceptPending = false
 	if e.mouseButton&64 != 0 {
+		m.drag = pickerDrag{}
+		m.lastClickItem = -1
+		// Horizontal wheel reports have no vertical meaning.
+		if e.mouseButton&2 != 0 {
+			return false
+		}
 		delta := 3
 		if e.mouseButton&1 == 0 {
 			delta = -delta
@@ -418,11 +487,16 @@ func (m *pickerModel) mouse(e pickerEvent, now time.Time) bool {
 		}
 		return false
 	}
+	if m.scrollbarMouse(e) {
+		return false
+	}
 	if m.help || e.mouseButton != 0 || e.y < 3 || e.y >= 3+m.listRows() {
+		m.lastClickItem = -1
 		return false
 	}
 	row := m.offset + e.y - 3
 	if row >= len(m.matches) || m.searching || m.queryErr != nil {
+		m.lastClickItem = -1
 		return false
 	}
 	m.focus = row

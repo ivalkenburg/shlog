@@ -50,7 +50,7 @@ func TestPickerSortOrder(t *testing.T) {
 		{"recency tie", "git a\ngit b\n", "git", pickerRelevance, false, []int{2, 1}},
 		{"empty relevance", "long old command\nx\n", "", pickerRelevance, false, []int{2, 1}},
 		{"negative only", "long old command\nx\n", "!sudo", pickerRelevance, false, []int{2, 1}},
-		{"frequency", "git\ngit\npwd\n", "", pickerFrequency, false, []int{2, 1, 3}},
+		{"frequency", "git\ngit\npwd\n", "", pickerFrequency, false, []int{2, 3}},
 		{"unique frequency", "git\ngit\npwd\n", "", pickerFrequency, true, []int{2, 3}},
 		{"frequency tie", "git\npwd\ngit\npwd\n", "", pickerFrequency, true, []int{4, 3}},
 		{"normalized relevance", "café\necho cafe\n", "cafe", pickerRelevance, false, []int{1, 2}},

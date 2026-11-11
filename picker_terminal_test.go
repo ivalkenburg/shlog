@@ -173,6 +173,7 @@ func (p *pickerPTY) waitForTerminalCleanup() {
 	}{
 		{"alternate screen", "\x1b[?1049h", "\x1b[?1049l", false},
 		{"mouse tracking", "\x1b[?1000h", "\x1b[?1000l", false},
+		{"mouse dragging", "\x1b[?1002h", "\x1b[?1002l", false},
 		{"mouse coordinates", "\x1b[?1006h", "\x1b[?1006l", false},
 		{"bracketed paste", "\x1b[?2004h", "\x1b[?2004l", false},
 		{"visible cursor", "\x1b[?25h", "\x1b[?25l", true},
@@ -304,6 +305,35 @@ func TestPickerWheelAndDoubleClick(t *testing.T) {
 	}
 }
 
+func TestPickerScrollbarMouseInput(t *testing.T) {
+	var history strings.Builder
+	for i := 1; i <= 100; i++ {
+		fmt.Fprintf(&history, "echo %d\n", i)
+	}
+	hist := writeTempHistory(t, history.String())
+	for _, tt := range []struct {
+		name, input string
+		command     int
+	}{
+		{"thumb drag", "\x1b[<0;79;4M\x1b[<32;1;24M", 11},
+		{"rail jump", "\x1b[<0;79;9M", 55},
+		{"rail then drag", "\x1b[<0;79;9M\x1b[<32;1;24M", 11},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := startPickerPTY(t, "--histfile", hist, "pick")
+			p.waitText("\x1b[2;3H\x1b[?25h")
+			p.send(tt.input)
+			p.waitText(fmt.Sprintf("#%d ·", tt.command))
+			// Release outside the panel; later motion must not change selection.
+			p.send("\x1b[<0;1;1m\x1b[<32;79;4M\r")
+			if out, err := p.wait(); err != nil || out != fmt.Sprintf("echo %d\n", tt.command) {
+				t.Fatalf("scrollbar selection = %q, %v", out, err)
+			}
+		})
+	}
+	assertNoBackup(t, hist)
+}
+
 func TestPickerSearchPasteAndHelp(t *testing.T) {
 	hist := writeTempHistory(t, "git checkout main\necho café\nsudo git status\n")
 	p := startPickerPTY(t, "--histfile", hist, "pick")
@@ -405,6 +435,21 @@ func TestPickerCommandSubstitution(t *testing.T) {
 	}
 }
 
+func TestPickerCommandSubstitutionDoesNotSuspendParent(t *testing.T) {
+	hist := writeTempHistory(t, "old\necho chosen\n")
+	p := startPTYCommand(t, "/bin/sh", "-c", `result="$("$1" --histfile "$2" pick)"; printf '<%s>' "$result"`, "shlog-test", binaryPath, hist)
+	p.waitText("shlog pick")
+	p.send("\x1achosen")
+	p.waitText("1 / 2")
+	if strings.Contains(p.terminal.String(), "\x1b[?1049l") {
+		t.Fatal("unsupported suspension left the picker and stranded its parent shell")
+	}
+	p.send("\r")
+	if out, err := p.wait(); err != nil || out != "<echo chosen>" {
+		t.Fatalf("Ctrl-Z in command substitution = %q, %v", out, err)
+	}
+}
+
 func TestPickerWithoutControllingTerminal(t *testing.T) {
 	hist := writeTempHistory(t, "echo hello\n")
 	cmd := exec.Command(binaryPath, "--histfile", hist, "pick")
@@ -442,6 +487,15 @@ func TestPickerEscapeThenTypingLeavesHelp(t *testing.T) {
 }
 
 func TestPickerSuspendAndResume(t *testing.T) {
+	for _, tt := range []struct{ name, suffix string }{
+		{"standalone", ""}, {"pipeline", " | /bin/cat"},
+	} {
+		t.Run(tt.name, func(t *testing.T) { testPickerSuspendAndResume(t, tt.suffix) })
+	}
+}
+
+func testPickerSuspendAndResume(t *testing.T, suffix string) {
+	t.Helper()
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("bash is not installed")
 	}
@@ -459,7 +513,7 @@ func TestPickerSuspendAndResume(t *testing.T) {
 	// Keep checkout and temporary paths with spaces intact in the shell.
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 	after = p.checkpoint()
-	p.send(quote(binaryPath) + " --histfile " + quote(hist) + " pick\n")
+	p.send(quote(binaryPath) + " --histfile " + quote(hist) + " pick" + suffix + "\n")
 	p.waitTextAfter("shlog pick", after)
 	p.send("cafe")
 	p.waitText("1 / 2")
@@ -474,6 +528,9 @@ func TestPickerSuspendAndResume(t *testing.T) {
 	if strings.Count(suspended, "\x1b[?1049l") != 1 || strings.Contains(suspended, "\x1b[?1049h") {
 		t.Fatalf("picker did not remain suspended: %q", suspended)
 	}
+	if !strings.Contains(suspended, "\x1b[?1002l") {
+		t.Fatal("suspend did not disable mouse dragging")
+	}
 	// A shell command proves that the stopped picker is no longer reading
 	// terminal input; a termios-only assertion cannot catch a surviving reader.
 	after = p.checkpoint()
@@ -482,6 +539,7 @@ func TestPickerSuspendAndResume(t *testing.T) {
 	after = p.checkpoint()
 	p.send("fg\n")
 	p.waitTextAfter("\x1b[?1049h", after)
+	p.waitTextAfter("\x1b[?1002h", after)
 	p.waitTextAfter("cafe", after)
 	state, err = readTerminalState(p.slaveFD)
 	if err != nil || state.Lflag&(syscall.ICANON|syscall.ECHO) != 0 {
@@ -583,19 +641,63 @@ func TestPickerUniqueAndSortControls(t *testing.T) {
 	assertNoBackup(t, hist)
 }
 
-func TestDeletionFrequencySortKeepsIndividualOccurrences(t *testing.T) {
+func TestDeletionFrequencySortDeletesGroupedOccurrences(t *testing.T) {
 	hist := writeTempHistory(t, "git\ngit\npwd\n")
 	p := startPickerPTY(t, "del", "--pick", "--sort", "frequency", "-f", "--histfile", hist)
 	p.waitText("[ most used first ]")
-	p.waitText("3 / 3")
+	p.waitText("2 / 2")
 	p.send("\r")
 	out, err := p.wait()
 	assertExitStatus(t, err, 0)
-	if !strings.Contains(out, "Deleted 1 entries") {
+	if !strings.Contains(out, "Deleted 2 entries") {
 		t.Fatalf("unexpected deletion: %q", out)
 	}
-	assertFileContent(t, hist, "git\npwd\n")
+	assertFileContent(t, hist, "pwd\n")
 	assertFileContent(t, hist+".bak", "git\ngit\npwd\n")
+}
+
+func TestDeletionFrequencySortConfirmsScopedEntryCount(t *testing.T) {
+	original := "git\ngit\ngit\npwd\n"
+	hist := writeTempHistory(t, original)
+	p := startPickerPTY(t, "del", "--pick", "--sort", "frequency", "-3", "--histfile", hist)
+	p.waitText("2 / 2")
+	p.send("\r")
+	p.waitText("About to delete 2 of 4 entries. Confirm? [y/N]")
+	p.waitForTerminalCleanup()
+	assertFileContent(t, hist, original)
+	assertNoBackup(t, hist)
+	p.send("y\n")
+	if out, err := p.wait(); err != nil || !strings.Contains(out, "Deleted 2 entries") {
+		t.Fatalf("grouped deletion = %q, %v", out, err)
+	}
+	assertFileContent(t, hist, "git\npwd\n") // The out-of-scope git survives.
+	assertFileContent(t, hist+".bak", original)
+}
+
+func TestFrequencyMultiOutputAndSortRestoration(t *testing.T) {
+	hist := writeTempHistory(t, "git\ngit\npwd\n")
+	for _, newest := range []bool{false, true} {
+		t.Run(fmt.Sprint(newest), func(t *testing.T) {
+			p := startPickerPTY(t, "pick", "--multi", "--sort", "frequency", "--histfile", hist)
+			p.waitText("2 / 2")
+			p.send("\t") // Mark both git occurrences through their grouped row.
+			p.waitText("1 command · 2 entries selected")
+			want := "git\n"
+			if newest {
+				p.send("\x13")
+				p.waitText("[ newest first ]")
+				p.waitText("3 / 3")
+				p.waitText("2 selected")
+				want = "git\ngit\n"
+			}
+			p.send("\r")
+			if out, err := p.wait(); err != nil || out != want {
+				t.Fatalf("multi output = %q, %v; want %q", out, err, want)
+			}
+		})
+	}
+	assertFileContent(t, hist, "git\ngit\npwd\n")
+	assertNoBackup(t, hist)
 }
 
 func TestPickerSIGINTCancellationStatus(t *testing.T) {

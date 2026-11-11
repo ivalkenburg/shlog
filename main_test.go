@@ -46,6 +46,7 @@ func TestWriteIndexedReturnsWriteError(t *testing.T) {
 
 func TestDefaultHistoryFilePathFish(t *testing.T) {
 	t.Setenv("HISTFILE", "")
+	t.Setenv("XDG_DATA_HOME", "")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SHELL", "/usr/local/bin/fish")
 	want := filepath.Join(os.Getenv("HOME"), ".local", "share", "fish", "fish_history")

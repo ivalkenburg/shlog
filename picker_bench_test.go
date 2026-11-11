@@ -84,6 +84,35 @@ func BenchmarkPickerRenderLongLine(b *testing.B) {
 	}
 }
 
+func BenchmarkPickerLongCluster(b *testing.B) {
+	for _, count := range []int{1_000, 10_000, 40_000} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			text := "e" + strings.Repeat("\u0301", count)
+			b.ReportAllocs()
+			for b.Loop() {
+				pickerGlyphsWithin(text, nil, 80)
+			}
+		})
+	}
+}
+
+func BenchmarkPickerGroupedRender(b *testing.B) {
+	for _, count := range []int{1_000, 100_000} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			entries := make([]*Entry, count)
+			for i := range entries {
+				entries[i] = &Entry{Raw: []string{"git status"}}
+			}
+			m := newPickerModel(entries, entries, pickerOptions{multi: true, sort: pickerFrequency})
+			m.render(false)
+			b.ReportAllocs()
+			for b.Loop() {
+				m.render(false)
+			}
+		})
+	}
+}
+
 func BenchmarkPickerSort10K(b *testing.B) {
 	entries := make([]*Entry, 10_000)
 	for i := range entries {
@@ -96,6 +125,21 @@ func BenchmarkPickerSort10K(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				filterPicker(context.Background(), m.items, q, order)
+			}
+		})
+	}
+}
+
+func BenchmarkPickerStartup10K(b *testing.B) {
+	for _, distinct := range []int{100, 10_000} {
+		b.Run(fmt.Sprint(distinct), func(b *testing.B) {
+			entries := make([]*Entry, 10_000)
+			for i := range entries {
+				entries[i] = &Entry{Raw: []string{fmt.Sprintf(": %d:0;PATH=/tmp/Café_%d docker RUN --NAME=myContainer", 1000+i, i%distinct)}}
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				newPickerModel(entries, entries, pickerOptions{})
 			}
 		})
 	}

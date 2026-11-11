@@ -7,10 +7,11 @@ import (
 )
 
 type pickerEvent struct {
-	key, text   string
-	mouseButton int
-	x, y        int // Zero-based terminal cells.
-	err         error
+	key, text    string
+	mouseButton  int
+	mouseRelease bool
+	x, y         int // Zero-based terminal cells.
+	err          error
 }
 
 type pickerDecoder struct {
@@ -129,14 +130,14 @@ func decodePickerSequence(s string) (pickerEvent, bool) {
 	if key := pickerSequenceKey(s); key != "" {
 		return pickerEvent{key: key}, true
 	}
-	if strings.HasPrefix(s, "\x1b[<") && strings.HasSuffix(s, "M") {
+	if strings.HasPrefix(s, "\x1b[<") && (strings.HasSuffix(s, "M") || strings.HasSuffix(s, "m")) {
 		parts := strings.Split(s[3:len(s)-1], ";")
 		if len(parts) == 3 {
 			button, e1 := strconv.Atoi(parts[0])
 			x, e2 := strconv.Atoi(parts[1])
 			y, e3 := strconv.Atoi(parts[2])
 			if e1 == nil && e2 == nil && e3 == nil && button >= 0 && x > 0 && y > 0 {
-				return pickerEvent{key: "mouse", mouseButton: button, x: x - 1, y: y - 1}, true
+				return pickerEvent{key: "mouse", mouseButton: button, mouseRelease: strings.HasSuffix(s, "m"), x: x - 1, y: y - 1}, true
 			}
 		}
 	}

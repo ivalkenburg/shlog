@@ -190,6 +190,9 @@ func BenchmarkPickerCancelledSearch100K(b *testing.B) {
 }
 
 func FuzzExtendedSearch(f *testing.F) {
+	// Regression seed: invalid UTF-8 decodes to RuneError, whose encoded width
+	// differs from the source byte width when advancing through a match.
+	f.Add("\xc8A\u0368", "\x8d")
 	for _, seed := range [][2]string{{"gco", "git checkout"}, {"^git !sudo", "git main"}, {"cafe", "cafe\u0301"}, {"αβ | 你好", "ΑΒ你好"}, {`\\ \!`, "\\!"}} {
 		f.Add(seed[0], seed[1])
 	}

@@ -2,9 +2,35 @@ package main
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestPickerBoundedWrappingPreservesVisibleRows(t *testing.T) {
+	for _, text := range []string{
+		strings.Repeat("line\n", 1000), strings.Repeat("你好 é 👩‍💻 ", 100),
+		"\tfirst\n\n\tsecond\tline\n", strings.Repeat("payload ", 1000),
+		strings.Repeat("\x1b\t\u202e😀", 1000),
+	} {
+		for _, width := range []int{1, 4, 8, 28, 78} {
+			full := wrapPickerText(text, []int{0, 5, 10}, width)
+			for _, limit := range []int{1, 2, 6, len(full) + 1} {
+				got := wrapPickerTextRows(text, []int{0, 5, 10}, width, limit)
+				if !reflect.DeepEqual(got, full[:min(limit, len(full))]) {
+					t.Fatalf("bounded wrapping changed visible rows at width %d, limit %d", width, limit)
+				}
+			}
+		}
+	}
+}
+
+func TestPickerWrappedTabsUseNewRowTabStop(t *testing.T) {
+	lines := wrapPickerText("abcde\tx", nil, 6)
+	if len(lines) != 2 || renderPickerGlyphs(lines[0].glyphs, 6, false, "") != "abcde" || renderPickerGlyphs(lines[1].glyphs, 6, false, "") != "    x" {
+		t.Fatal("a tab crossing a wrap boundary used the preceding row's tab stop")
+	}
+}
 
 func assertPickerCacheFrame(t *testing.T, m *pickerModel) {
 	t.Helper()
@@ -103,6 +129,28 @@ func TestPickerGlyphClippingMatchesFullText(t *testing.T) {
 	}
 }
 
+func TestPickerLongGraphemeClusters(t *testing.T) {
+	marks := strings.Repeat("\u0301", 10_000)
+	for _, tt := range []struct {
+		text, want string
+		width      int
+	}{
+		{"e" + marks, "e" + marks, 1},
+		{marks, "◌" + marks, 1},
+		{"\xff" + marks, "�" + marks, 1},
+		{"\x01" + marks, "^A" + marks, 2},
+		{"👩" + strings.Repeat("\u200d👩", 10_000), "👩" + strings.Repeat("\u200d👩", 10_000), 2},
+	} {
+		glyphs, complete := pickerGlyphsWithin(tt.text, []int{5_000}, 80)
+		if !complete || len(glyphs) != 1 || glyphs[0].text != tt.want || glyphs[0].width != tt.width || !glyphs[0].matched {
+			t.Fatalf("long cluster was corrupted: %d glyphs, complete=%t", len(glyphs), complete)
+		}
+		if clipped, complete := pickerGlyphsWithin(tt.text, nil, tt.width-1); complete || len(clipped) != 0 {
+			t.Fatal("oversized cluster was split instead of clipped")
+		}
+	}
+}
+
 func FuzzPickerGlyphClipping(f *testing.F) {
 	for _, text := range []string{"plain text", "a♥️b", "👩‍💻x", "🇳🇱x", "e\u0301", "\xffx", "\x1b[31m", "☝🏻", "a\u200db\u200dc", "a\u200d\x00", "👩\u200d\u202e", "a🏻"} {
 		f.Add(text, uint8(3))
@@ -116,6 +164,25 @@ func FuzzPickerGlyphClipping(f *testing.F) {
 		clipped, complete := pickerGlyphsWithin(text, nil, limit)
 		if complete != (glyphWidth(full) <= limit) || renderPickerGlyphs(clipped, limit, false, "") != renderPickerGlyphs(full, limit, false, "") {
 			t.Fatalf("width-limited preparation changed glyphs for %q at %d", text, limit)
+		}
+	})
+}
+
+func FuzzPickerBoundedWrapping(f *testing.F) {
+	// A tab can shrink from two raw glyph cells to a one-cell tab stop.
+	f.Add("000\t\x06000000000000000\x1400000\x1c000000\x01000000000000", uint8(129), uint8(0))
+	for _, text := range []string{"abcde\tx", "你好 é 👩‍💻\n\tlast", "\x1b\t\u202e😀", "\xffx\n\nend"} {
+		f.Add(text, uint8(28), uint8(3))
+	}
+	f.Fuzz(func(t *testing.T, text string, width, rows uint8) {
+		if len(text) > 2048 {
+			t.Skip()
+		}
+		columns, limit := 1+int(width%80), 1+int(rows%16)
+		full := wrapPickerText(text, []int{0, 2, 5}, columns)
+		bounded := wrapPickerTextRows(text, []int{0, 2, 5}, columns, limit)
+		if !reflect.DeepEqual(bounded, full[:min(limit, len(full))]) {
+			t.Fatalf("bounded wrapping changed visible rows at width %d, limit %d for %q", columns, limit, text)
 		}
 	})
 }

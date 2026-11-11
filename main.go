@@ -212,7 +212,11 @@ func defaultHistoryFilePath() string {
 	// the binary is invoked from a different shell session.
 	shell := os.Getenv("SHELL")
 	if strings.Contains(shell, "fish") {
-		return filepath.Join(home, ".local", "share", "fish", "fish_history")
+		dataHome := os.Getenv("XDG_DATA_HOME")
+		if dataHome == "" {
+			dataHome = filepath.Join(home, ".local", "share")
+		}
+		return filepath.Join(dataHome, "fish", "fish_history")
 	}
 	if strings.Contains(shell, "bash") {
 		return filepath.Join(home, ".bash_history")
@@ -274,7 +278,7 @@ Commands:
   pick --multi [<selection>]      pick multiple entries
   pick --unique [<selection>]     group identical commands, keeping the latest row
   pick --sort <order> [<sel>]     order by newest (default), relevance, or frequency
-  del --pick --sort <order>       choose individual entries in that order
+  del --pick --sort <order>       order by newest, relevance, or grouped frequency
   undo                            restore history from the last backup
   completion <shell>              print shell completion script (zsh, bash, fish)
   version                         print the current version
@@ -290,6 +294,7 @@ Options (before or after the command; -- ends option parsing):
 Interactive picker (macOS/Linux):
   Full-screen fuzzy search with multiline preview and mouse support.
   Click [ newest first ] or press Ctrl-S to cycle result sorting.
+  Most used first groups identical commands; deletion includes all scoped copies.
   Tab marks entries in multi-select mode; output remains newest-first.
   Enter accepts; Esc/Ctrl-C cancels; F1 shows syntax and controls.
   Uses the controlling terminal, including with redirected stdout.

@@ -14,8 +14,8 @@ import (
 	"unsafe"
 )
 
-const pickerEnterTerminal = "\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[2J\x1b[H"
-const pickerLeaveTerminal = "\x1b[0m\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l"
+const pickerEnterTerminal = "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[2J\x1b[H"
+const pickerLeaveTerminal = "\x1b[0m\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l"
 
 type terminalState = syscall.Termios
 
@@ -60,6 +60,22 @@ func terminalSize(fd int) (int, int, error) {
 	var size struct{ rows, cols, x, y uint16 }
 	err := terminalIOCTL(fd, syscall.TIOCGWINSZ, unsafe.Pointer(&size))
 	return int(size.cols), int(size.rows), err
+}
+
+// A job-control shell waits for every process in a foreground pipeline to stop.
+// Stop that job together, but never stop a group shared with the parent shell
+// (as in command substitution). Zero means suspension would strand that shell.
+func pickerStopTarget(fd int) int {
+	group := syscall.Getpgrp()
+	parentGroup, err := syscall.Getpgid(os.Getppid())
+	if err == nil && group == parentGroup {
+		return 0
+	}
+	var foreground int32
+	if err == nil && group > 0 && group != parentGroup && terminalIOCTL(fd, syscall.TIOCGPGRP, unsafe.Pointer(&foreground)) == nil && group == int(foreground) {
+		return -group
+	}
+	return os.Getpid()
 }
 
 type pickerSearchResult struct {
@@ -119,9 +135,7 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 		if width < 30 || height < 10 {
 			return fmt.Errorf("picker needs a terminal of at least 30 columns and 10 rows (got %d×%d)", width, height)
 		}
-		m.width, m.height = width, height
-		m.ensureVisible()
-		m.revealMatch()
+		m.resize(width, height)
 		return nil
 	}
 	if err := resize(); err != nil {
@@ -192,13 +206,18 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 		}()
 	}
 	suspend := func() error {
+		m.drag = pickerDrag{}
+		target := pickerStopTarget(fd)
+		if target == 0 {
+			return nil
+		}
 		stopInput()
 		if err := leave(); err != nil {
 			return err
 		}
 		// SIGSTOP cannot be recaptured by Go's asynchronous signal handler.
 		// Execution continues here only after the shell resumes the job.
-		if err := syscall.Kill(os.Getpid(), syscall.SIGSTOP); err != nil {
+		if err := syscall.Kill(target, syscall.SIGSTOP); err != nil {
 			return err
 		}
 		if err := enter(); err != nil {
@@ -218,6 +237,9 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 		case e := <-events:
 			if e.err != nil {
 				return nil, fmt.Errorf("read picker input: %w", e.err)
+			}
+			if e.key != "mouse" {
+				m.drag = pickerDrag{}
 			}
 			switch e.key {
 			case "cancel":
