@@ -274,7 +274,7 @@ func pickerPair(left, right string, width int) string {
 	left = fitPickerText(left, width)
 	leftWidth := glyphWidth(pickerGlyphs(left, nil))
 	if width-leftWidth < 6 {
-		return fitPickerText(left, width)
+		return ansiBold + left + ansiReset
 	}
 	right = fitPickerText(right, width-leftWidth-2)
 	rightWidth := glyphWidth(pickerGlyphs(right, nil))

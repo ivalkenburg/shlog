@@ -56,7 +56,7 @@ func TestCompletionScript_Fish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, want := range []string{"complete -c shlog", "dry-run", "histfile", "del", "clean", "list", "grep", "stats", "undo", "completion"} {
+	for _, want := range []string{"complete -c shlog", "dry-run", "-l histfile -r -F", "del", "clean", "list", "grep", "stats", "undo", "completion"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("fish script missing %q", want)
 		}

@@ -460,8 +460,10 @@ func (m *pickerModel) key(e pickerEvent) bool {
 			return true
 		}
 	case "ctrl-u":
-		m.input, m.cursor = nil, 0
-		return true
+		if len(m.input) > 0 {
+			m.input, m.cursor = nil, 0
+			return true
+		}
 	case "ctrl-w":
 		start := m.cursor
 		for start > 0 && unicode.IsSpace(m.input[start-1]) {
@@ -470,9 +472,11 @@ func (m *pickerModel) key(e pickerEvent) bool {
 		for start > 0 && !unicode.IsSpace(m.input[start-1]) {
 			start--
 		}
-		m.input = slices.Delete(m.input, start, m.cursor)
-		m.cursor = start
-		return true
+		if start < m.cursor {
+			m.input = slices.Delete(m.input, start, m.cursor)
+			m.cursor = start
+			return true
+		}
 	case "text", "paste":
 		text := strings.Map(func(r rune) rune {
 			if r == '\n' || r == '\r' || r == '\t' {
@@ -525,8 +529,11 @@ func (m *pickerModel) mouse(e pickerEvent, now time.Time) bool {
 		m.lastClickItem = -1
 		return false
 	}
+	before := m.focused()
 	m.focus = row
-	m.revealMatch()
+	if before != m.focused() {
+		m.revealMatch()
+	}
 	if m.options.multi && e.x < 4 {
 		m.toggle()
 		m.lastClickItem = -1

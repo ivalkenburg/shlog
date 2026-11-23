@@ -203,7 +203,7 @@ complete -c shlog -s f -d 'force: skip confirmation prompt'
 complete -c shlog -s s -d 'simulate: show what would change without writing'
 complete -c shlog -l dry-run -d 'simulate: show what would change without writing'
 complete -c shlog -s o -d 'output: print resulting file content without writing'
-complete -c shlog -l histfile -r -d 'use custom history file instead of default'
+complete -c shlog -l histfile -r -F -d 'use custom history file instead of default'
 complete -c shlog -s h -l help -d 'print help'
 
 # Commands (only when no subcommand has been given yet)
@@ -223,7 +223,6 @@ complete -c shlog -n "not __fish_seen_subcommand_from $cmds" -a help       -d 'p
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l match -r -d 'regex pattern to match against command text'
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l invert -d 'delete entries that do NOT match (requires --match)'
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l pick   -d 'interactively select entries to delete'
-
 complete -c shlog -n '__fish_seen_subcommand_from del'   -l sort -x -a 'newest relevance frequency' -d 'result ordering (requires --pick)'
 
 # clean subcommand options
@@ -231,9 +230,8 @@ complete -c shlog -n '__fish_seen_subcommand_from clean' -l keep-oldest -d 'keep
 
 # pick subcommand options
 complete -c shlog -n '__fish_seen_subcommand_from pick'  -l multi -d 'select multiple entries'
-
-complete -c shlog -n '__fish_seen_subcommand_from pick' -l unique -d 'group identical commands'
-complete -c shlog -n '__fish_seen_subcommand_from pick' -l sort -x -a 'newest relevance frequency' -d 'result ordering'
+complete -c shlog -n '__fish_seen_subcommand_from pick'  -l unique -d 'group identical commands'
+complete -c shlog -n '__fish_seen_subcommand_from pick'  -l sort -x -a 'newest relevance frequency' -d 'result ordering'
 
 # completion subcommand: suggest shell names
 complete -c shlog -n '__fish_seen_subcommand_from completion' -a 'zsh bash fish' -d 'shell'

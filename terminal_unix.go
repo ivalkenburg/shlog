@@ -238,9 +238,6 @@ func runPicker(m *pickerModel) (selected []*Entry, err error) {
 			if e.err != nil {
 				return nil, fmt.Errorf("read picker input: %w", e.err)
 			}
-			if e.key != "mouse" {
-				m.drag = pickerDrag{}
-			}
 			switch e.key {
 			case "cancel":
 				return nil, errPickerCanceled

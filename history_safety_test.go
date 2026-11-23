@@ -139,3 +139,107 @@ func TestTimestampedPreambleIgnoresContinuedMarkers(t *testing.T) {
 		t.Fatal("timestamped preamble roundtrip changed raw history")
 	}
 }
+
+func TestRestoreBackupIfUnchanged(t *testing.T) {
+	t.Run("restores when unchanged", func(t *testing.T) {
+		dir := t.TempDir()
+		hist := filepath.Join(dir, "history")
+		if err := os.WriteFile(hist, []byte("current\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hist+".bak", []byte("backup\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		backup, err := readHistoryBackup(hist + ".bak")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreBackupIfUnchanged(hist, []byte("current\n"), true, backup); err != nil {
+			t.Fatalf("restoreBackupIfUnchanged: %v", err)
+		}
+		assertFileContent(t, hist, "backup\n")
+		assertFileContent(t, hist+".bak", "current\n")
+	})
+
+	t.Run("restores missing history file", func(t *testing.T) {
+		dir := t.TempDir()
+		hist := filepath.Join(dir, "history")
+		if err := os.WriteFile(hist+".bak", []byte("backup\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		backup, err := readHistoryBackup(hist + ".bak")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreBackupIfUnchanged(hist, nil, false, backup); err != nil {
+			t.Fatalf("restoreBackupIfUnchanged: %v", err)
+		}
+		assertFileContent(t, hist, "backup\n")
+	})
+
+	t.Run("refuses when history changed", func(t *testing.T) {
+		dir := t.TempDir()
+		hist := filepath.Join(dir, "history")
+		if err := os.WriteFile(hist, []byte("modified\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hist+".bak", []byte("backup\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		backup, err := readHistoryBackup(hist + ".bak")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreBackupIfUnchanged(hist, []byte("original\n"), true, backup); err == nil || !strings.Contains(err.Error(), "history file changed") {
+			t.Fatalf("expected history changed error, got: %v", err)
+		}
+	})
+
+	t.Run("refuses when missing history was recreated", func(t *testing.T) {
+		dir := t.TempDir()
+		hist := filepath.Join(dir, "history")
+		if err := os.WriteFile(hist, []byte("new\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hist+".bak", []byte("backup\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		backup, err := readHistoryBackup(hist + ".bak")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreBackupIfUnchanged(hist, nil, false, backup); err == nil || !strings.Contains(err.Error(), "history file changed") {
+			t.Fatalf("expected history changed error, got: %v", err)
+		}
+	})
+
+	t.Run("refuses when backup changed", func(t *testing.T) {
+		dir := t.TempDir()
+		hist := filepath.Join(dir, "history")
+		if err := os.WriteFile(hist, []byte("current\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hist+".bak", []byte("backup\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		backup, err := readHistoryBackup(hist + ".bak")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hist+".bak", []byte("other\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreBackupIfUnchanged(hist, []byte("current\n"), true, backup); err == nil || !strings.Contains(err.Error(), "backup changed") {
+			t.Fatalf("expected backup changed error, got: %v", err)
+		}
+	})
+}
+
+func TestSelectEntriesRejectsNegativePlus(t *testing.T) {
+	entries := []*Entry{{Timestamp: 1700000000, Raw: []string{": 1700000000:0;echo hi"}}}
+	for _, sel := range []string{"-+1", "-+5", "-+1h"} {
+		if _, err := SelectEntries(entries, sel); err == nil {
+			t.Errorf("SelectEntries(%q) unexpectedly succeeded", sel)
+		}
+	}
+}

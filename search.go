@@ -233,11 +233,12 @@ func (q searchQuery) score(ctx context.Context, s searchText, work *searchWorksp
 	total := 0
 	for _, group := range q.groups {
 		best, found := 0, false
-		for _, t := range group {
+		for i := range group {
+			t := &group[i]
 			if t.negative || !t.matches(s) {
 				continue
 			}
-			_, score, ok := work.align(ctx, t, s, false)
+			_, score, ok := work.align(ctx, *t, s, false)
 			if !ok {
 				return 0, false
 			}
@@ -325,11 +326,12 @@ func (q searchQuery) positions(s searchText) []int {
 	for _, group := range q.groups {
 		var best []int
 		bestScore, found := 0, false
-		for _, t := range group {
+		for i := range group {
+			t := &group[i]
 			if t.negative || !t.matches(s) {
 				continue
 			}
-			p, score, _ := work.align(context.Background(), t, s, true)
+			p, score, _ := work.align(context.Background(), *t, s, true)
 			if !found || score > bestScore {
 				best, bestScore, found = p, score, true
 			}

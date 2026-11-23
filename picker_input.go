@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -27,11 +28,11 @@ func (d *pickerDecoder) feed(data []byte, timeout bool) []pickerEvent {
 	var events []pickerEvent
 	for len(d.pending) != 0 {
 		if d.paste {
-			const end = "\x1b[201~"
-			if i := strings.Index(string(d.pending), end); i >= 0 {
+			end := []byte("\x1b[201~")
+			if i := bytes.Index(d.pending, end); i >= 0 {
 				d.text = append(d.text, d.pending[:i]...)
 				events = append(events, pickerEvent{key: "paste", text: string(d.text)})
-				d.text = nil
+				d.text = d.text[:0]
 				d.pending = d.pending[i+len(end):]
 				d.paste = false
 				continue
@@ -49,19 +50,18 @@ func (d *pickerDecoder) feed(data []byte, timeout bool) []pickerEvent {
 					break
 				}
 				events = append(events, pickerEvent{key: "escape"})
-				d.pending = nil
+				d.pending = d.pending[:0]
 				continue
 			}
 			if d.pending[1] == 0x1b {
 				// Some terminals encode Alt-arrow as Escape + a normal arrow.
-				up, down := "\x1b\x1b[A", "\x1b\x1b[B"
-				pending := string(d.pending)
-				if !timeout && len(pending) < len(up) && (strings.HasPrefix(up, pending) || strings.HasPrefix(down, pending)) {
+				up, down := []byte("\x1b\x1b[A"), []byte("\x1b\x1b[B")
+				if !timeout && len(d.pending) < len(up) && (bytes.HasPrefix(up, d.pending) || bytes.HasPrefix(down, d.pending)) {
 					break
 				}
-				if strings.HasPrefix(pending, up) || strings.HasPrefix(pending, down) {
+				if bytes.HasPrefix(d.pending, up) || bytes.HasPrefix(d.pending, down) {
 					key := "alt-up"
-					if strings.HasPrefix(pending, down) {
+					if bytes.HasPrefix(d.pending, down) {
 						key = "alt-down"
 					}
 					events = append(events, pickerEvent{key: key})
@@ -82,7 +82,7 @@ func (d *pickerDecoder) feed(data []byte, timeout bool) []pickerEvent {
 				}
 				if end == len(d.pending) {
 					if timeout || end > 128 {
-						d.pending = nil
+						d.pending = d.pending[:0]
 					}
 					break
 				}
@@ -122,6 +122,9 @@ func (d *pickerDecoder) feed(data []byte, timeout bool) []pickerEvent {
 		}
 		events = append(events, pickerEvent{key: "text", text: string(d.pending[:n])})
 		d.pending = d.pending[n:]
+	}
+	if len(d.pending) == 0 {
+		d.pending = d.pending[:0]
 	}
 	return events
 }

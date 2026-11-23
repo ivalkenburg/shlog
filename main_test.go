@@ -113,3 +113,19 @@ func TestColorRequiresActualTerminal(t *testing.T) {
 		t.Fatal("character device /dev/null was treated as a terminal")
 	}
 }
+
+func TestCommandPreviewEscaping(t *testing.T) {
+	for _, tt := range []struct {
+		in, want string
+	}{
+		{"echo hi", "echo hi"},
+		{"echo hi\nsecond", "echo hi ↵"},
+		{"echo \x1b[31mred\a", "echo ^[[31mred^G"},
+		{"echo \u202efake\nline2", "echo <202E>fake ↵"},
+		{"echo \xff", "echo \ufffd"},
+	} {
+		if got := commandPreview(tt.in); got != tt.want {
+			t.Errorf("commandPreview(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}

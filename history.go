@@ -9,18 +9,54 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-var entryHeaderRe = regexp.MustCompile(`^: (\d+):(\d+);`)
+// parseZshHeader parses a zsh extended history header `: <ts>:<elapsed>;`.
+// Returns the timestamp, elapsed seconds, byte index where the command starts,
+// and whether the line matched.
+func parseZshHeader(line string) (ts, elapsed int64, cmdStart int, ok bool) {
+	if len(line) < 6 || line[0] != ':' || line[1] != ' ' {
+		return 0, 0, 0, false
+	}
+	i := 2
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i == 2 || i >= len(line) || line[i] != ':' {
+		return 0, 0, 0, false
+	}
+	tsEnd := i
+	i++
+	elStart := i
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i == elStart || i >= len(line) || line[i] != ';' {
+		return 0, 0, 0, false
+	}
+	ts, _ = strconv.ParseInt(line[2:tsEnd], 10, 64)
+	elapsed, _ = strconv.ParseInt(line[elStart:i], 10, 64)
+	return ts, elapsed, i + 1, true
+}
 
-// bashTimestampRe matches the `#<unix_timestamp>` lines written by bash when
+// parseBashTimestamp parses a `#<unix_timestamp>` line written by bash when
 // HISTTIMEFORMAT is set. Requires at least 10 digits to avoid false-positives
 // on short shell comments like `#123`.
-var bashTimestampRe = regexp.MustCompile(`^#(\d{10,})$`)
+func parseBashTimestamp(line string) (int64, bool) {
+	if len(line) < 11 || line[0] != '#' {
+		return 0, false
+	}
+	for i := 1; i < len(line); i++ {
+		if line[i] < '0' || line[i] > '9' {
+			return 0, false
+		}
+	}
+	ts, _ := strconv.ParseInt(line[1:], 10, 64)
+	return ts, true
+}
 
 // Fish escapes both backslashes and newlines; decode them in a single pass so
 // an escaped literal backslash followed by "n" is not turned into a newline.
@@ -97,10 +133,10 @@ func detectFormatLines(lines []string) histFormat {
 		if historyContinuation(lines, at) {
 			continue
 		}
-		if entryHeaderRe.MatchString(line) {
+		if _, _, _, ok := parseZshHeader(line); ok {
 			return formatZsh
 		}
-		if bashTimestampRe.MatchString(line) {
+		if _, ok := parseBashTimestamp(line); ok {
 			return formatBashTimestamped
 		}
 		if strings.HasPrefix(line, "- cmd: ") {
@@ -126,9 +162,7 @@ func parseZshLines(lines []string) []*Entry {
 	for _, line := range lines {
 		if current != nil && strings.HasSuffix(current.Raw[len(current.Raw)-1], `\`) {
 			current.Raw = append(current.Raw, line)
-		} else if m := entryHeaderRe.FindStringSubmatch(line); m != nil {
-			ts, _ := strconv.ParseInt(m[1], 10, 64)
-			elapsed, _ := strconv.ParseInt(m[2], 10, 64)
+		} else if ts, elapsed, _, ok := parseZshHeader(line); ok {
 			current = &Entry{
 				Timestamp: ts,
 				Elapsed:   elapsed,
@@ -154,22 +188,32 @@ const zshMeta = 0x83
 // zshCommandText decodes the command lines of a zsh entry: the backslash
 // before each newline is removed and metafied bytes are restored. Blank lines
 // kept after the command are not part of it.
-func zshCommandText(lines []string) string {
-	var b strings.Builder
-	for i, line := range lines {
-		if i == len(lines)-1 || !strings.HasSuffix(line, `\`) {
-			// zsh adds a sentinel space after a final backslash (including
-			// backslash followed by spaces) so it cannot become a continuation.
-			if strings.HasSuffix(line, " ") && strings.HasSuffix(strings.TrimRight(line, " "), `\`) {
-				line = line[:len(line)-1]
-			}
-			b.WriteString(line)
-			break
+func zshCommandText(first string, rest []string) string {
+	var s string
+	if len(rest) == 0 {
+		// zsh adds a sentinel space after a final backslash (including
+		// backslash followed by spaces) so it cannot become a continuation.
+		if strings.HasSuffix(first, " ") && strings.HasSuffix(strings.TrimRight(first, " "), `\`) {
+			first = first[:len(first)-1]
 		}
-		b.WriteString(line[:len(line)-1])
-		b.WriteByte('\n')
+		s = first
+	} else {
+		var b strings.Builder
+		line := first
+		for i := 0; ; i++ {
+			if i == len(rest) || !strings.HasSuffix(line, `\`) {
+				if strings.HasSuffix(line, " ") && strings.HasSuffix(strings.TrimRight(line, " "), `\`) {
+					line = line[:len(line)-1]
+				}
+				b.WriteString(line)
+				break
+			}
+			b.WriteString(line[:len(line)-1])
+			b.WriteByte('\n')
+			line = rest[i]
+		}
+		s = b.String()
 	}
-	s := b.String()
 	if strings.IndexByte(s, zshMeta) < 0 {
 		return s
 	}
@@ -192,15 +236,19 @@ func zshCommandText(lines []string) string {
 // can contain both kinds when HISTTIMEFORMAT was enabled after earlier use.
 func parseBashTimestampedLines(lines []string) []*Entry {
 	firstMarker := 0
-	for firstMarker < len(lines) && (historyContinuation(lines, firstMarker) || !bashTimestampRe.MatchString(lines[firstMarker])) {
+	for firstMarker < len(lines) {
+		if !historyContinuation(lines, firstMarker) {
+			if _, ok := parseBashTimestamp(lines[firstMarker]); ok {
+				break
+			}
+		}
 		firstMarker++
 	}
 	entries := parseBashPlainLines(lines[:firstMarker])
 	var current *Entry
 
 	for _, line := range lines[firstMarker:] {
-		if m := bashTimestampRe.FindStringSubmatch(line); m != nil {
-			ts, _ := strconv.ParseInt(m[1], 10, 64)
+		if ts, ok := parseBashTimestamp(line); ok {
 			current = &Entry{Timestamp: ts, Raw: []string{line}}
 			entries = append(entries, current)
 		} else if current != nil {
@@ -551,17 +599,15 @@ func CommandText(e *Entry) string {
 	first := e.Raw[0]
 
 	// zsh: strip `: <ts>:<elapsed>;` prefix from first line, then decode
-	if header := entryHeaderRe.FindStringIndex(first); header != nil {
-		lines := slices.Clone(e.Raw)
-		lines[0] = first[header[1]:]
-		return zshCommandText(lines)
+	if _, _, cmdStart, ok := parseZshHeader(first); ok {
+		return zshCommandText(first[cmdStart:], e.Raw[1:])
 	}
 	if e.zsh {
-		return zshCommandText(e.Raw)
+		return zshCommandText(first, e.Raw[1:])
 	}
 
 	// bash timestamped: first line is `#<ts>`, command starts at Raw[1]
-	if bashTimestampRe.MatchString(first) {
+	if _, ok := parseBashTimestamp(first); ok {
 		return strings.Join(e.Raw[1:], "\n")
 	}
 
@@ -678,11 +724,11 @@ func ComputeStats(entries []*Entry, topN int) Stats {
 	for cmd, n := range counts {
 		all = append(all, CommandCount{cmd, n})
 	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].Count != all[j].Count {
-			return all[i].Count > all[j].Count
+	slices.SortFunc(all, func(a, b CommandCount) int {
+		if a.Count != b.Count {
+			return b.Count - a.Count
 		}
-		return all[i].Command < all[j].Command
+		return strings.Compare(a.Command, b.Command)
 	})
 	if topN > len(all) {
 		topN = len(all)
@@ -730,6 +776,9 @@ func SelectEntries(entries []*Entry, selection string) ([]*Entry, error) {
 	raw := selection
 	if negative {
 		raw = selection[1:]
+		if strings.HasPrefix(raw, "+") {
+			return nil, fmt.Errorf("invalid selection %q: not a valid integer, duration, date, or date range", selection)
+		}
 	}
 
 	// Try integer first

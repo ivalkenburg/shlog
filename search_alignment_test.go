@@ -216,7 +216,7 @@ func FuzzFuzzyAlignment(f *testing.F) {
 	f.Fuzz(func(t *testing.T, query, text string) {
 		// Exhaustive enumeration remains small enough to be an independent oracle.
 		needle, raw := []rune(query), []rune(text)
-		if len(needle) == 0 || len(needle) > 4 || len(raw) > 10 {
+		if len(needle) == 0 || len(needle) > 4 || len(raw) > 12 {
 			t.Skip()
 		}
 		query = string(needle)

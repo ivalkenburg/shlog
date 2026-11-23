@@ -398,3 +398,157 @@ func TestPickerDecoderChunkBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestPickerNoOpEditsDoNotTriggerSearch(t *testing.T) {
+	m := newPickerModel(nil, nil, pickerOptions{})
+	for _, key := range []string{"ctrl-u", "ctrl-w", "backspace", "delete"} {
+		if m.key(pickerEvent{key: key}) {
+			t.Errorf("%s on empty input reported query change", key)
+		}
+	}
+	m.key(pickerEvent{key: "text", text: "git"})
+	m.key(pickerEvent{key: "home"})
+	if m.key(pickerEvent{key: "ctrl-w"}) {
+		t.Error("ctrl-w at cursor 0 reported query change")
+	}
+	if m.key(pickerEvent{key: "backspace"}) {
+		t.Error("backspace at cursor 0 reported query change")
+	}
+	m.key(pickerEvent{key: "end"})
+	if m.key(pickerEvent{key: "delete"}) {
+		t.Error("delete at end of input reported query change")
+	}
+	if !m.key(pickerEvent{key: "ctrl-w"}) || len(m.input) != 0 {
+		t.Error("ctrl-w with word before cursor did not report query change")
+	}
+	m.key(pickerEvent{key: "text", text: "git"})
+	if !m.key(pickerEvent{key: "ctrl-u"}) || len(m.input) != 0 {
+		t.Error("ctrl-u with non-empty input did not report query change")
+	}
+}
+
+func TestPickerKeyNavigationAndHelp(t *testing.T) {
+	all := []*Entry{
+		{Raw: []string{"one"}},
+		{Raw: []string{"two"}},
+		{Raw: []string{"line1", "line2", "line3", "line4", "line5", "line6"}},
+	}
+	m := newPickerModel(all, all, pickerOptions{multi: true})
+	m.width, m.height = 80, 14
+
+	// Preview scroll and clicking the already-focused row preserves previewScroll.
+	m.key(pickerEvent{key: "alt-down"})
+	if m.previewScroll != 1 {
+		t.Fatalf("alt-down previewScroll = %d, want 1", m.previewScroll)
+	}
+	m.mouse(pickerEvent{mouseButton: 0, x: 2, y: 3}, time.Now())
+	if m.previewScroll != 1 {
+		t.Fatalf("clicking already-focused row reset previewScroll to %d", m.previewScroll)
+	}
+	m.key(pickerEvent{key: "alt-up"})
+	if m.previewScroll != 0 {
+		t.Fatalf("alt-up previewScroll = %d, want 0", m.previewScroll)
+	}
+
+	// Page navigation and back-tab.
+	m.key(pickerEvent{key: "page-down"})
+	if m.focus != 2 {
+		t.Fatalf("page-down focus = %d, want 2", m.focus)
+	}
+	m.key(pickerEvent{key: "back-tab"})
+	if m.focus != 1 || !m.marked[2] {
+		t.Fatalf("back-tab focus=%d marked=%v", m.focus, m.marked)
+	}
+	m.key(pickerEvent{key: "page-up"})
+	if m.focus != 0 {
+		t.Fatalf("page-up focus = %d, want 0", m.focus)
+	}
+
+	// Cursor movement keys.
+	m.key(pickerEvent{key: "text", text: "ab"})
+	m.key(pickerEvent{key: "home"})
+	m.key(pickerEvent{key: "right"})
+	if m.cursor != 1 {
+		t.Fatalf("cursor = %d, want 1", m.cursor)
+	}
+	m.key(pickerEvent{key: "ctrl-e"})
+	if m.cursor != 2 {
+		t.Fatalf("ctrl-e cursor = %d, want 2", m.cursor)
+	}
+
+	// Help mode scrolling and toggle.
+	m.key(pickerEvent{key: "help"})
+	if !m.help {
+		t.Fatal("help key did not open help")
+	}
+	m.key(pickerEvent{key: "down"})
+	if m.helpScroll != 1 {
+		t.Fatalf("help down scroll = %d, want 1", m.helpScroll)
+	}
+	m.key(pickerEvent{key: "up"})
+	if m.helpScroll != 0 {
+		t.Fatalf("help up scroll = %d, want 0", m.helpScroll)
+	}
+	m.key(pickerEvent{key: "page-down"})
+	if m.helpScroll == 0 {
+		t.Fatal("help page-down did not scroll")
+	}
+	m.key(pickerEvent{key: "page-up"})
+	if m.helpScroll != 0 {
+		t.Fatalf("help page-up scroll = %d, want 0", m.helpScroll)
+	}
+	m.key(pickerEvent{key: "help"})
+	if m.help {
+		t.Fatal("help key did not close help")
+	}
+}
+
+func TestPickerDecoderAllControlsAndSequences(t *testing.T) {
+	controls := map[byte]string{
+		1: "ctrl-a", 3: "cancel", 4: "delete", 5: "ctrl-e",
+		8: "backspace", 9: "tab", 10: "enter", 12: "redraw",
+		13: "enter", 14: "ctrl-n", 16: "ctrl-p", 19: "ctrl-s",
+		21: "ctrl-u", 23: "ctrl-w", 26: "suspend", 127: "backspace",
+		2: "", // unmapped control byte
+	}
+	d := pickerDecoder{}
+	for b, want := range controls {
+		events := d.feed([]byte{b}, false)
+		if want == "" {
+			if len(events) != 0 {
+				t.Errorf("control byte %d produced unexpected events: %+v", b, events)
+			}
+		} else if len(events) != 1 || events[0].key != want {
+			t.Errorf("control byte %d = %+v, want %q", b, events, want)
+		}
+	}
+
+	sequences := map[string]string{
+		"\x1b[A": "up", "\x1bOA": "up",
+		"\x1b[B": "down", "\x1bOB": "down",
+		"\x1b[C": "right", "\x1bOC": "right",
+		"\x1b[D": "left", "\x1bOD": "left",
+		"\x1b[H": "home", "\x1bOH": "home", "\x1b[1~": "home", "\x1b[7~": "home",
+		"\x1b[F": "end", "\x1bOF": "end", "\x1b[4~": "end", "\x1b[8~": "end",
+		"\x1b[3~": "delete", "\x1b[5~": "page-up", "\x1b[6~": "page-down",
+		"\x1b[Z": "back-tab",
+		"\x1bOP": "help", "\x1b[11~": "help", "\x1b[[A": "help",
+		"\x1b[1;3A": "alt-up", "\x1b[1;3B": "alt-down",
+		"\x1b[999~": "", "\x1b[<0;1M": "", "\x1b[<;;M": "", "\x1b[<0;0;1M": "",
+	}
+	for seq, want := range sequences {
+		events := d.feed([]byte(seq), false)
+		if want == "" {
+			if len(events) != 0 {
+				t.Errorf("sequence %q produced unexpected events: %+v", seq, events)
+			}
+		} else if len(events) != 1 || events[0].key != want {
+			t.Errorf("sequence %q = %+v, want %q", seq, events, want)
+		}
+	}
+
+	// Overlong incomplete CSI sequence is discarded rather than stalling.
+	if events := d.feed([]byte("\x1b["+strings.Repeat("1;", 80)), false); len(events) != 0 || len(d.pending) != 0 {
+		t.Fatalf("overlong CSI was not discarded: events=%+v pending=%d", events, len(d.pending))
+	}
+}
